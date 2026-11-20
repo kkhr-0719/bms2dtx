@@ -1,0 +1,725 @@
+"""Unit tests for GUI helpers, preview player (with fakes), filename guesser, and a headless-safe App test."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import threading
+import unittest
+import wave
+from pathlib import Path
+from typing import Dict, List
+from unittest import mock
+
+from core import TAB_SPECS, MappingConfig, TabId, inspect_bms
+from gui.auto_guess import guess_assignments, guess_tab_for_filename
+from gui.helpers import (
+    GRAY_FOREGROUND,
+    NO_BIND_LABEL,
+    TAB_NOTES,
+    AssignmentModel,
+    bind_combobox_values,
+    build_health_summary,
+    check_output_dir,
+    default_dlevel_text,
+    filter_wav_ids,
+    format_wav_row,
+    load_mapping_json,
+    parse_dlevel,
+    radix_needs_notice,
+    save_mapping_json,
+    sorted_wav_ids,
+    suggest_output_dir,
+    tab_has_bind_combobox,
+    tab_title,
+)
+from gui.preview_player import PreviewPlayer
+
+BMS_TEXT = """#TITLE GUI Test
+#ARTIST Tester
+#BPM 120
+#PLAYLEVEL 7
+#WAV01 bd.wav
+#WAV02 sd.wav
+#WAV03 hh_open.wav
+#WAV04 other.wav
+#WAV05 ghost.wav
+#00111:01
+#00112:02
+#00113:03
+#00101:04
+#00201:04
+"""
+
+
+def _write_silent_wav(path: Path) -> None:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"\x00\x00" * 4410)
+
+
+def make_chart_dir(root: Path, name: str = "song") -> Path:
+    d = root / name
+    d.mkdir(parents=True)
+    for fn in ("bd.wav", "sd.wav", "hh_open.wav", "other.wav"):  # ghost.wav intentionally missing
+        _write_silent_wav(d / fn)
+    bms = d / "test.bms"
+    bms.write_bytes(BMS_TEXT.encode("cp932"))
+    return bms
+
+
+def snapshot(folder: Path) -> Dict[str, str]:
+    return {
+        str(p.relative_to(folder)): hashlib.sha1(p.read_bytes()).hexdigest()
+        for p in sorted(folder.rglob("*"))
+        if p.is_file()
+    }
+
+
+class ChartCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.bms = make_chart_dir(self.tmp)
+        self.chart = inspect_bms(self.bms)
+
+
+class AssignmentModelTests(ChartCase):
+    def test_assign_no_double_assignment_and_remove_resets_bind(self) -> None:
+        m = AssignmentModel()
+        added, skipped = m.assign(TabId.SD, ["01", "02"])
+        self.assertEqual((added, skipped), (["01", "02"], []))
+        added, skipped = m.assign(TabId.BD, ["02", "03"])
+        self.assertEqual(added, ["03"])
+        self.assertEqual(skipped, ["02"])
+        self.assertEqual(m.tab_of("02"), TabId.SD)
+        self.assertEqual(m.assigned_ids, {"01", "02", "03"})
+        m.set_bind(TabId.SD, "01")
+        self.assertEqual(m.get_bind(TabId.SD), "01")
+        m.remove(TabId.SD, ["01"])
+        self.assertIsNone(m.get_bind(TabId.SD))
+        self.assertIsNone(m.tab_of("01"))
+        self.assertEqual(m.count(TabId.SD), 1)
+
+    def test_bind_only_for_drum_tabs_and_member_wavs(self) -> None:
+        m = AssignmentModel()
+        m.assign(TabId.OTHER, ["01"])
+        with self.assertRaises(ValueError):
+            m.set_bind(TabId.OTHER, "01")
+        m.assign(TabId.SD, ["02"])
+        with self.assertRaises(ValueError):
+            m.set_bind(TabId.SD, "09")
+        m.set_bind(TabId.SD, None)
+        self.assertIsNone(m.get_bind(TabId.SD))
+        self.assertTrue(all(tab_has_bind_combobox(s.tab_id) == s.is_drum for s in TAB_SPECS))
+
+    def test_mapping_config_is_toggle_off(self) -> None:
+        m = AssignmentModel()
+        m.assign(TabId.BD, ["01"])
+        m.set_bind(TabId.BD, "01")
+        cfg = m.to_mapping_config()
+        self.assertIsInstance(cfg, MappingConfig)
+        self.assertFalse(cfg.toggle_on)
+        self.assertEqual(cfg.tab_wavs, {TabId.BD: ["01"]})
+        self.assertEqual(cfg.default_lane_binds, {TabId.BD: "01"})
+
+    def test_json_roundtrip_matches_cli_loader(self) -> None:
+        import cli
+
+        m = AssignmentModel()
+        m.assign(TabId.HH_OPEN, ["03"])
+        m.assign(TabId.BD, ["01"])
+        m.set_bind(TabId.HH_OPEN, "03")
+        path = self.tmp / "map.json"
+        save_mapping_json(m, path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["tab_wavs"]["HH_OPEN"], ["03"])
+        self.assertFalse(raw["toggle_on"])
+        cfg = cli._load_mapping_json(path)
+        self.assertEqual(cfg.tab_wavs[TabId.BD], ["01"])
+        self.assertEqual(cfg.default_lane_binds[TabId.HH_OPEN], "03")
+
+        m2 = AssignmentModel()
+        m2.assign(TabId.LC, ["04"])  # replaced on load
+        notes = load_mapping_json(m2, path, self.chart)
+        self.assertEqual(notes, [])
+        self.assertEqual(m2.tab_wavs[TabId.HH_OPEN], ["03"])
+        self.assertEqual(m2.tab_wavs[TabId.LC], [])
+        self.assertEqual(m2.get_bind(TabId.HH_OPEN), "03")
+
+    def test_json_load_reports_unknowns_and_toggle_on(self) -> None:
+        m = AssignmentModel()
+        notes = m.load_json_dict(
+            {
+                "tab_wavs": {"SD": ["02", "ZZ", "02"], "NOPE": ["01"], "bd": ["01"]},
+                "default_lane_binds": {"SD": "09"},
+                "toggle_on": True,
+            },
+            self.chart,
+        )
+        self.assertEqual(m.tab_wavs[TabId.SD], ["02"])
+        self.assertEqual(m.tab_wavs[TabId.BD], ["01"])
+        self.assertTrue(any("ZZ" in n for n in notes))
+        self.assertTrue(any("NOPE" in n for n in notes))
+        self.assertTrue(any("toggle_on" in n for n in notes))
+        self.assertIsNone(m.get_bind(TabId.SD))
+
+
+class ListFormattingTests(ChartCase):
+    def test_sorted_and_filtered(self) -> None:
+        self.assertEqual(sorted_wav_ids(self.chart), ["01", "02", "03", "04", "05"])
+        self.assertEqual(filter_wav_ids(self.chart, "HH"), ["03"])
+        self.assertEqual(filter_wav_ids(self.chart, "02"), ["02"])
+        self.assertEqual(filter_wav_ids(self.chart, "  SD.WAV "), ["02"])
+        self.assertEqual(filter_wav_ids(self.chart, "nothing"), [])
+        used = filter_wav_ids(self.chart, only_used=True)
+        self.assertEqual(used, [w for w in sorted_wav_ids(self.chart) if self.chart.wavs[w].use_count > 0])
+
+    def test_row_tags(self) -> None:
+        row = format_wav_row(self.chart.wavs["01"], None)
+        self.assertTrue(row.startswith("[01] bd.wav (×"))
+        missing = format_wav_row(self.chart.wavs["05"], TabId.SD)
+        self.assertIn("[缺失]", missing)
+        self.assertTrue(missing.endswith("→ SD"))
+        entry = self.chart.wavs["02"]
+        entry.suffix_corrected = True  # in-memory only; left list omits redundant [已修正] tag in v1.1
+        self.assertNotIn("[已修正]", format_wav_row(entry))
+        self.assertEqual(GRAY_FOREGROUND, "#888888")
+
+    def test_duplicate_physical_file_grouping_in_list_and_model(self) -> None:
+        dup_dir = self.tmp / "dup_gui"
+        dup_dir.mkdir()
+        _write_silent_wav(dup_dir / "Celesta_045.wav")
+        _write_silent_wav(dup_dir / "kick.wav")
+        bms = dup_dir / "dup.bms"
+        bms.write_bytes(
+            (
+                "#TITLE DupGui\n#BPM 120\n"
+                "#WAVV3 Celesta_045.wav\n"
+                "#WAVV4 Celesta_045.wav\n"
+                "#WAV01 kick.wav\n"
+                "#00101:V3V4V401\n"
+            ).encode("cp932")
+        )
+        chart = inspect_bms(bms)
+        # V3 (×1) and V4 (×2) share Celesta_045.wav -> folded into 1 row [V3, V4] Celesta_045.wav (×3)
+        filtered = filter_wav_ids(chart)
+        self.assertEqual(filtered, ["01", "V3"])
+        self.assertEqual(filter_wav_ids(chart, "V4"), ["V3"])
+        row = format_wav_row(chart.wavs["V3"], None, chart=chart)
+        self.assertEqual(row, "[V3, V4] Celesta_045.wav (×3)")
+
+        m = AssignmentModel(chart=chart)
+        added, skipped = m.assign(TabId.OTHER, ["V3"])
+        self.assertEqual((added, skipped), (["V3", "V4"], []))
+        self.assertEqual(m.tab_of("V3"), TabId.OTHER)
+        self.assertEqual(m.tab_of("V4"), TabId.OTHER)
+        self.assertEqual(m.count(TabId.OTHER), 1)
+        removed = m.remove(TabId.OTHER, ["V3"])
+        self.assertEqual(removed, ["V3", "V4"])
+        self.assertFalse(m.has_assignments)
+
+    def test_tab_title_badges_and_notes(self) -> None:
+        self.assertEqual(tab_title(TabId.SD, 6), "SD (6)")
+        self.assertEqual(tab_title(TabId.SD, 0), "SD")
+        self.assertEqual(tab_title(TabId.HH_CLOSE, 2), "HH Close (2)")
+        self.assertIn("SE6", TAB_NOTES[TabId.OTHER])
+        self.assertIn("66", TAB_NOTES[TabId.OTHER])
+        self.assertIn("SE11–SE12", TAB_NOTES[TabId.GUITAR])
+        self.assertIn("SE13–SE14", TAB_NOTES[TabId.BASS])
+
+    def test_bind_values_follow_tab_contents(self) -> None:
+        m = AssignmentModel()
+        self.assertEqual(bind_combobox_values(m, self.chart, TabId.SD), [(NO_BIND_LABEL, None)])
+        m.assign(TabId.SD, ["02"])
+        values = bind_combobox_values(m, self.chart, TabId.SD)
+        self.assertEqual([v[1] for v in values], [None, "02"])
+        self.assertIn("sd.wav", values[1][0])
+
+
+class SummaryAndExportHelperTests(ChartCase):
+    def test_health_summary(self) -> None:
+        rows = dict(build_health_summary(self.chart))
+        self.assertEqual(rows["标题"], "GUI Test")
+        self.assertEqual(rows["艺术家"], "Tester")
+        self.assertEqual(rows["BPM"], "120")
+        self.assertEqual(rows["编码"], self.chart.encoding_used)
+        self.assertEqual(rows["进制"], "Base-36")
+        self.assertIn("共 5", rows["WAV 数量"])
+        self.assertIn("缺失 1", rows["WAV 数量"])
+        self.assertIn("BGM 列", rows)
+        self.assertFalse(radix_needs_notice(self.chart))
+        self.assertEqual(default_dlevel_text(self.chart), "7")
+
+    def test_suggested_output_dir_is_sibling_not_inside(self) -> None:
+        out = suggest_output_dir(self.bms)
+        self.assertEqual(out.name, "song_dtx")
+        self.assertEqual(out.parent, self.bms.resolve().parent.parent)
+        self.assertIsNone(check_output_dir(out, self.chart))
+
+    def test_check_output_dir_rejects_source_folder(self) -> None:
+        self.assertIn("铁律 1", check_output_dir(self.bms.parent, self.chart))
+        self.assertIn("铁律 1", check_output_dir(str(self.bms.parent) + "\\.", self.chart))
+        self.assertIsNone(check_output_dir(self.tmp / "elsewhere", self.chart))
+
+    def test_parse_dlevel(self) -> None:
+        self.assertIsNone(parse_dlevel("  "))
+        self.assertEqual(parse_dlevel(" 450 "), 450)
+        with self.assertRaises(ValueError):
+            parse_dlevel("abc")
+        with self.assertRaises(ValueError):
+            parse_dlevel("-3")
+
+
+class AutoGuessTests(unittest.TestCase):
+    def test_guess_names(self) -> None:
+        cases = {
+            "kick01.wav": TabId.BD,
+            "BD_1.ogg": TabId.BD,
+            "snare.wav": TabId.SD,
+            "SD2.wav": TabId.SD,
+            "hihat_closed.wav": TabId.HH_CLOSE,
+            "hh_open.wav": TabId.HH_OPEN,
+            "open hihat.wav": TabId.HH_OPEN,
+            "crash1.wav": TabId.CY,
+            "ride.wav": TabId.RD,
+            "hightom.wav": TabId.HT,
+            "lowtom.wav": TabId.LT,
+            "floor tom.wav": TabId.FT,
+            "bass drum.wav": TabId.BD,
+        }
+        for name, tab in cases.items():
+            self.assertEqual(guess_tab_for_filename(name), tab, name)
+
+    def test_unknown_names_return_none(self) -> None:
+        for name in ("piano_c4.wav", "bass_synth.wav", "voice01.ogg", "123.wav", ""):
+            self.assertIsNone(guess_tab_for_filename(name), name)
+
+    def test_guess_assignments_groups_ids(self) -> None:
+        res = guess_assignments([("01", "kick.wav"), ("02", "x.wav"), ("03", "kick2.wav"), ("04", "snare.wav")])
+        self.assertEqual(res, {TabId.BD: ["01", "03"], TabId.SD: ["04"]})
+
+
+# ----------------------------------------------------------------- preview player
+class FakeWinsound:
+    SND_FILENAME = 0x20000
+    SND_ASYNC = 0x0001
+    SND_MEMORY = 0x0004
+    SND_PURGE = 0x0040
+
+    def __init__(self) -> None:
+        self.calls: List[tuple] = []
+
+    def PlaySound(self, sound, flags) -> None:  # noqa: N802 - mimics winsound
+        if flags & self.SND_MEMORY:
+            raise RuntimeError("Cannot play asynchronously from memory")
+        self.calls.append((sound, flags))
+
+    def played(self) -> List[str]:
+        return [c[0] for c in self.calls if c[0] is not None]
+
+
+class PreviewPlayerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.src_ogg = self.tmp / "a.ogg"
+        self.src_ogg.write_bytes(b"x")
+        self.src_wav = self.tmp / "b.wav"
+        _write_silent_wav(self.src_wav)
+        self.ws = FakeWinsound()
+        self.status: List[str] = []
+        self.decoded: List[Path] = []
+
+    def make(self, ffmpeg="ffmpeg.exe", decoder=None) -> PreviewPlayer:
+        def default_decoder(_ff: str, src: Path, dst: Path) -> None:
+            self.decoded.append(dst)
+            dst.write_bytes(b"RIFF")
+
+        player = PreviewPlayer(
+            lambda: ffmpeg,
+            on_status=self.status.append,
+            winsound_module=self.ws,
+            decoder=decoder or default_decoder,
+            temp_root=self.tmp,
+        )
+        self.addCleanup(player.shutdown)
+        return player
+
+    def test_decodes_to_temp_wav_and_plays_with_filename_async(self) -> None:
+        player = self.make()
+        self.assertTrue(player.play(self.src_ogg))
+        player._last_thread.join(5)
+        played = self.ws.played()
+        self.assertEqual(len(played), 1)
+        self.assertTrue(played[0].endswith("slot_0.wav"))
+        flags = [c[1] for c in self.ws.calls if c[0] == played[0]][0]
+        self.assertEqual(flags, FakeWinsound.SND_FILENAME | FakeWinsound.SND_ASYNC)
+        self.assertFalse(flags & FakeWinsound.SND_MEMORY)
+        # purge issued before playing
+        self.assertEqual(self.ws.calls[0], (None, FakeWinsound.SND_PURGE))
+
+    def test_rotates_two_slots(self) -> None:
+        player = self.make()
+        for _ in range(3):
+            player.play(self.src_ogg)
+            player._last_thread.join(5)
+        names = [Path(p).name for p in self.ws.played()]
+        self.assertEqual(names, ["slot_0.wav", "slot_1.wav", "slot_0.wav"])
+
+    def test_stale_decode_is_discarded(self) -> None:
+        gate = threading.Event()
+        started = threading.Event()
+        order: List[str] = []
+
+        def decoder(_ff: str, src: Path, dst: Path) -> None:
+            order.append(dst.name)
+            if len(order) == 1:
+                started.set()
+                gate.wait(5)
+            dst.write_bytes(b"RIFF")
+
+        player = self.make(decoder=decoder)
+        player.play(self.src_ogg)
+        first = player._last_thread
+        self.assertTrue(started.wait(5))
+        player.play(self.src_ogg)
+        second = player._last_thread
+        second.join(5)
+        gate.set()
+        first.join(5)
+        played = [Path(p).name for p in self.ws.played()]
+        self.assertEqual(played, ["slot_1.wav"])  # only the newest decode is played
+
+    def test_stop_discards_pending_decode_and_purges(self) -> None:
+        gate = threading.Event()
+
+        def decoder(_ff: str, src: Path, dst: Path) -> None:
+            gate.wait(5)
+            dst.write_bytes(b"RIFF")
+
+        player = self.make(decoder=decoder)
+        player.play(self.src_ogg)
+        thread = player._last_thread
+        player.stop()
+        gate.set()
+        thread.join(5)
+        self.assertEqual(self.ws.played(), [])
+        self.assertEqual(self.ws.calls[-1], (None, FakeWinsound.SND_PURGE))
+
+    def test_without_ffmpeg_plays_wav_directly_but_not_others(self) -> None:
+        player = self.make(ffmpeg=None)
+        self.assertTrue(player.play(self.src_wav))
+        self.assertEqual(self.ws.played(), [str(self.src_wav)])
+        self.ws.calls.clear()
+        self.assertFalse(player.play(self.src_ogg))
+        self.assertEqual(self.ws.played(), [])
+        self.assertTrue(any("ffmpeg" in s for s in self.status))
+
+    def test_unsupported_wav_error_is_caught(self) -> None:
+        class Boom(FakeWinsound):
+            def PlaySound(self, sound, flags) -> None:  # noqa: N802
+                if sound is not None:
+                    raise RuntimeError("bad format")
+
+        self.ws = Boom()
+        player = self.make(ffmpeg=None)
+        player.play(self.src_wav)
+        self.assertTrue(any("无法播放" in s for s in self.status))
+
+    def test_decode_failure_falls_back_for_wav_and_reports_for_others(self) -> None:
+        def decoder(_ff: str, src: Path, dst: Path) -> None:
+            raise RuntimeError("ffmpeg exploded")
+
+        player = self.make(decoder=decoder)
+        player.play(self.src_ogg)
+        player._last_thread.join(5)
+        self.assertEqual(self.ws.played(), [])
+        self.assertTrue(any("解码失败" in s for s in self.status))
+        player.play(self.src_wav)
+        player._last_thread.join(5)
+        self.assertEqual(self.ws.played(), [str(self.src_wav)])
+
+    def test_missing_source_and_shutdown_cleanup(self) -> None:
+        player = self.make()
+        self.assertFalse(player.play(self.tmp / "nope.wav"))
+        player.play(self.src_ogg)
+        player._last_thread.join(5)
+        temp_dir = player.temp_dir
+        self.assertTrue(temp_dir.is_dir())
+        player.shutdown()
+        self.assertFalse(temp_dir.exists())
+        self.assertEqual(self.ws.calls[-1], (None, FakeWinsound.SND_PURGE))
+        self.assertFalse(player.play(self.src_ogg))
+
+
+# --------------------------------------------------------------------- GUI (Tk)
+def _tk_root():
+    import tkinter as tk
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # no display available
+        raise unittest.SkipTest(f"Tk unavailable: {exc}")
+    root.withdraw()
+    return root
+
+
+class I18nTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        from gui.i18n import DEFAULT_LANGUAGE, set_language
+
+        set_language(DEFAULT_LANGUAGE)
+
+    def test_dictionary_completeness_across_all_3_languages(self) -> None:
+        from gui.i18n import LANGUAGE_CODES, TRANSLATIONS, set_language, tr
+
+        self.assertEqual(set(LANGUAGE_CODES), {"zh_CN", "en", "ja"})
+        base_keys = set(TRANSLATIONS["zh_CN"].keys())
+        self.assertGreater(len(base_keys), 50)
+        for lang in LANGUAGE_CODES:
+            self.assertEqual(
+                set(TRANSLATIONS[lang].keys()),
+                base_keys,
+                msg=f"Key mismatch in language {lang}",
+            )
+            for k, val in TRANSLATIONS[lang].items():
+                self.assertIsInstance(val, str, msg=f"{lang}.{k} is not str")
+                self.assertTrue(val.strip(), msg=f"{lang}.{k} is empty")
+
+        set_language("en")
+        self.assertIn("#DLEVEL", tr("dlevel_label"))
+        set_language("ja")
+        self.assertIn("#DLEVEL", tr("dlevel_label"))
+        set_language("zh_CN")
+        self.assertIn("#DLEVEL", tr("dlevel_label"))
+
+    def test_save_and_load_language_preference(self) -> None:
+        from gui.i18n import load_language_preference, save_language_preference
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "settings.json"
+            self.assertEqual(load_language_preference(cfg), "zh_CN")
+            self.assertTrue(save_language_preference("ja", cfg))
+            self.assertEqual(load_language_preference(cfg), "ja")
+            self.assertTrue(save_language_preference("en", cfg))
+            self.assertEqual(load_language_preference(cfg), "en")
+
+
+class AppIntegrationTests(ChartCase):
+    def setUp(self) -> None:
+        super().setUp()
+        from gui.i18n import DEFAULT_LANGUAGE, set_language
+
+        set_language(DEFAULT_LANGUAGE)
+        self.root = _tk_root()
+        from gui import app as app_mod
+
+        self.app_mod = app_mod
+        self.app = app_mod.App(self.root, startup_dialogs=False)
+        self.addCleanup(self._close)
+        self.app.apply_chart(self.chart)
+        self.root.update()
+
+    def _close(self) -> None:
+        from gui.i18n import DEFAULT_LANGUAGE, set_language
+
+        set_language(DEFAULT_LANGUAGE)
+        try:
+            self.app.on_close()
+        except Exception:
+            pass
+
+    def test_layout_has_15_tabs_in_canonical_order_and_toggle_hidden(self) -> None:
+        # By default separate_lbd is unchecked -> LBD is hidden (14 visible tabs)
+        self.assertFalse(self.app.separate_lbd_var.get())
+        self.assertEqual(
+            self.app.visible_tabs(),
+            [s.tab_id for s in TAB_SPECS if s.tab_id != TabId.LBD],
+        )
+        # Checking separate_lbd reveals all 15 tabs in canonical TAB_SPECS order
+        self.app.separate_lbd_var.set(True)
+        self.app._on_toggle_separate_lbd()
+        self.assertEqual(self.app.visible_tabs(), [s.tab_id for s in TAB_SPECS])
+        titles = [self.app.tab_buttons[s.tab_id].cget("text") for s in TAB_SPECS]
+        self.assertEqual(titles, [s.label for s in TAB_SPECS])
+        self.assertEqual(str(self.app.left_list.cget("selectmode")), "extended")
+        for tab, panel in self.app.panels.items():
+            self.assertEqual(str(panel.listbox.cget("selectmode")), "extended")
+            self.assertEqual(panel.combo is not None, tab_has_bind_combobox(tab))
+        self.assertFalse(hasattr(self.app, "toggle_var"))
+        # Progressbar at rest is determinate with value 0 (never stuck in indeterminate green block)
+        self.assertEqual(str(self.app.progress.cget("mode")), "determinate")
+        self.assertEqual(float(self.app.progress.cget("value")), 0.0)
+
+    def test_import_does_not_auto_guess(self) -> None:
+        self.assertFalse(self.app.model.has_assignments)
+
+    def test_add_gray_remove_cycle_and_bind_reset(self) -> None:
+        app = self.app
+        ids = app._left_ids
+        app.left_list.selection_set(ids.index("01"))
+        app.left_list.selection_set(ids.index("02"))
+        app.select_tab(TabId.SD)
+        app.on_add()
+        self.assertEqual(app.model.tab_wavs[TabId.SD], ["01", "02"])
+        self.assertEqual(app.tab_buttons[TabId.SD].cget("text"), "SD (2)")
+        i1 = app._left_ids.index("01")
+        self.assertEqual(app.left_list.itemcget(i1, "foreground"), GRAY_FOREGROUND)
+        self.assertTrue(app.left_list.get(i1).endswith("→ SD"))
+        # cannot double assign into another tab
+        app.left_list.selection_set(i1)
+        app.select_tab(TabId.BD)
+        app.on_add()
+        self.assertEqual(app.model.tab_wavs[TabId.BD], [])
+        # default bind combobox
+        combo = app.panels[TabId.SD].combo
+        self.assertEqual(len(combo.cget("values")), 3)
+        combo.current(1)
+        app.panels[TabId.SD]._on_bind_selected()
+        self.assertEqual(app.model.get_bind(TabId.SD), "01")
+        # remove bound wav -> reset combobox
+        app.select_tab(TabId.SD)
+        app.panels[TabId.SD].listbox.selection_set(0)
+        app.on_remove()
+        self.assertEqual(app.model.tab_wavs[TabId.SD], ["02"])
+        self.assertIsNone(app.model.get_bind(TabId.SD))
+        self.assertEqual(combo.get(), NO_BIND_LABEL)
+        self.assertNotEqual(app.left_list.itemcget(app._left_ids.index("01"), "foreground"), GRAY_FOREGROUND)
+
+    def test_click_and_arrow_key_auto_preview_and_language_switch(self) -> None:
+        app = self.app
+        self.assertTrue(app.auto_preview_var.get())
+        with mock.patch.object(app.player, "play") as play_mock:
+            # Click index 1 ("02" -> sd.wav)
+            app._on_left_click_index(1)
+            play_mock.assert_called_once_with(self.chart.wavs["02"].resolved_path)
+            play_mock.reset_mock()
+
+            # Arrow key press + release cycle on index 2 ("03" -> hh_open.wav) plays once without stutter
+            app.left_list.activate(2)
+            app._on_left_arrow_press()
+            self.root.update()
+            play_mock.assert_called_once_with(self.chart.wavs["03"].resolved_path)
+            app._on_left_arrow_release()
+            play_mock.assert_called_once_with(self.chart.wavs["03"].resolved_path)
+            play_mock.reset_mock()
+
+            # Direct _on_left_arrow_key call also works
+            app.left_list.activate(1)
+            app._on_left_arrow_key()
+            play_mock.assert_called_once_with(self.chart.wavs["02"].resolved_path)
+            play_mock.reset_mock()
+
+            # Uncheck auto_preview_var -> click/arrow no longer auto-plays, but spacebar preview still works
+            app.auto_preview_var.set(False)
+            app._on_left_click_index(0)
+            app._on_left_arrow_key()
+            play_mock.assert_not_called()
+            app.left_list.selection_clear(0, "end")
+            app.left_list.selection_set(0)
+            app.preview_from_left()
+            play_mock.assert_called_once_with(self.chart.wavs["01"].resolved_path)
+            app.auto_preview_var.set(True)
+
+        # Toggle Separate LBD on -> assign slice & bind to LBD -> toggle off clears LBD & switches active tab
+        app.separate_lbd_var.set(True)
+        app._on_toggle_separate_lbd()
+        app.select_tab(TabId.LBD)
+        app.model.assign(TabId.LBD, ["01"], chart=self.chart)
+        app.model.set_bind(TabId.LBD, "01")
+        app.refresh_all()
+        self.assertEqual(app.active_tab(), TabId.LBD)
+        self.assertEqual(app.model.get_bind(TabId.LBD), "01")
+        app.separate_lbd_var.set(False)
+        app._on_toggle_separate_lbd()
+        self.assertEqual(app.active_tab(), TabId.LP)
+        self.assertEqual(app.model.tab_wavs[TabId.LBD], [])
+        self.assertIsNone(app.model.get_bind(TabId.LBD))
+
+        # Dynamic language switch + persistence (including status bar when chart is loaded)
+        cfg_file = self.tmp / "gui_lang.json"
+        app.config_path = cfg_file
+        app._persist_lang = True
+        app.change_language("en")
+        self.assertIn("Drums Level", app.dlevel_label.cget("text"))
+        self.assertIn("Loaded", app.status_var.get())
+        app.change_language("ja")
+        self.assertIn("ドラム難易度", app.dlevel_label.cget("text"))
+        self.assertIn("読込完了", app.status_var.get())
+        from gui.i18n import load_language_preference
+
+        self.assertEqual(load_language_preference(cfg_file), "ja")
+        app.change_language("zh_CN")
+        self.assertIn("鼓难度", app.dlevel_label.cget("text"))
+        self.assertIn("已载入", app.status_var.get())
+
+    def test_search_filter_updates_list(self) -> None:
+        self.app.search_var.set("hh_open")
+        self.root.update()
+        self.assertEqual(self.app._left_ids, ["03"])
+        self.app.search_var.set("")
+        self.root.update()
+        self.assertEqual(len(self.app._left_ids), 5)
+
+    def test_guess_only_fills_unassigned_and_asks_confirmation(self) -> None:
+        app = self.app
+        app.model.assign(TabId.OTHER, ["01"])  # manual: 01 (bd.wav) kept even though it "looks like" BD
+        app.refresh_all()
+        with mock.patch.object(self.app_mod.messagebox, "askyesno", return_value=False) as ask:
+            app.on_guess()
+            ask.assert_called_once()
+        self.assertEqual(app.model.tab_wavs[TabId.SD], [])
+        with mock.patch.object(self.app_mod.messagebox, "askyesno", return_value=True):
+            app.on_guess()
+        self.assertEqual(app.model.tab_wavs[TabId.OTHER], ["01"])
+        self.assertEqual(app.model.tab_wavs[TabId.SD], ["02"])
+        self.assertEqual(app.model.tab_wavs[TabId.HH_OPEN], ["03"])
+
+    def test_export_rejects_source_folder(self) -> None:
+        app = self.app
+        app.out_var.set(str(self.bms.parent))
+        with mock.patch.object(self.app_mod.messagebox, "showerror") as err:
+            app.on_export()
+            err.assert_called_once()
+        self.assertFalse(app._busy)
+
+    def test_background_export_without_ffmpeg_leaves_source_untouched(self) -> None:
+        app = self.app
+        app.ffmpeg_path = None
+        app._update_ffmpeg_ui()
+        self.assertEqual(str(app.ogg_chk.cget("state")), "disabled")
+        app.model.assign(TabId.BD, ["01"])
+        app.model.assign(TabId.SD, ["02"])
+        app.model.set_bind(TabId.SD, "02")
+        app.refresh_all()
+        out = self.tmp / "out_dtx"
+        app.out_var.set(str(out))
+        before = snapshot(self.bms.parent)
+        shown: List[str] = []
+        with mock.patch.object(self.app_mod.messagebox, "askyesno", return_value=True), mock.patch.object(
+            app, "show_text_dialog", side_effect=lambda title, text, **kw: shown.append(text)
+        ), mock.patch.object(self.app_mod.messagebox, "showerror") as err:
+            app.on_export()
+            self.assertTrue(app._busy)
+            for _ in range(400):
+                self.root.update()
+                if not app._busy:
+                    break
+                threading.Event().wait(0.05)
+            err.assert_not_called()
+        self.assertFalse(app._busy)
+        self.assertTrue((out / "test.dtx").is_file())
+        text = (out / "test.dtx").read_bytes().decode("cp932")
+        self.assertIn("#DTXC_LANEBINDEDCHIP: 04", text)
+        self.assertTrue(shown and "test.dtx" in shown[0])
+        self.assertEqual(snapshot(self.bms.parent), before)
+
+
+if __name__ == "__main__":
+    unittest.main()

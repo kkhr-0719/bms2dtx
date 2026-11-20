@@ -1,0 +1,539 @@
+"""Multi-language internationalization (i18n) dictionary and preference persistence for bms2dtx GUI."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+SUPPORTED_LANGUAGES: Tuple[Tuple[str, str], ...] = (
+    ("zh_CN", "简体中文"),
+    ("en", "English"),
+    ("ja", "日本語"),
+)
+
+LANGUAGE_CODES: Tuple[str, ...] = tuple(code for code, _label in SUPPORTED_LANGUAGES)
+LANGUAGE_LABELS: Dict[str, str] = {code: label for code, label in SUPPORTED_LANGUAGES}
+LABEL_TO_LANGUAGE: Dict[str, str] = {label: code for code, label in SUPPORTED_LANGUAGES}
+
+DEFAULT_LANGUAGE = "zh_CN"
+_current_language: str = DEFAULT_LANGUAGE
+
+TRANSLATIONS: Dict[str, Dict[str, str]] = {
+    "zh_CN": {
+        "open_bms_btn": "选择 .bms / .bme 文件",
+        "no_chart_selected": "（尚未选择谱面；也可用命令行参数传入文件）",
+        "ffmpeg_ok": "ffmpeg: {path}",
+        "ffmpeg_missing_short": "ffmpeg: 未找到（已禁用 bgm.ogg 混音 / .ogg 转码 / 非 WAV 试听）",
+        "pick_ffmpeg_btn": "指定 ffmpeg.exe...",
+        "lang_label": "语言:",
+        "filetypes_bms": "BMS / BME 谱面",
+        "filetypes_all": "所有文件",
+        "health_frame_title": "谱面体检",
+        "health_placeholder": "导入谱面后将在此显示：标题 / 艺术家 / BPM / 编码 / 进制 / WAV 统计 / BGM 列统计 / 警告",
+        "view_warnings_btn": "查看警告 ({count})",
+        "health_title": "标题",
+        "health_artist": "艺术家",
+        "health_bpm": "BPM",
+        "health_encoding": "编码",
+        "health_radix": "进制",
+        "health_wav_count": "WAV 数量",
+        "health_wav_value": "共 {total} / 后缀已内存修正 {corrected} / 缺失 {missing}",
+        "health_bgm_cols": "BGM 列",
+        "health_bgm_value": "非空 B1..Bn 共 {count} 列 / 已剔除空轨 {pruned}",
+        "health_warnings": "警告",
+        "health_warnings_value": "{count} 条",
+        "radix_warn_base62": "  ⚠ 检测到 62 进制，超出 DTX 原生 36 进制上限",
+        "radix_warn_limit": "  ⚠ 切片总数 > 1295（v1 固定 Toggle = OFF 离线混音 bgm.ogg）",
+        "left_frame_title": "源 #WAV 列表（Shift/Ctrl 多选；单击 / 方向键 / 空格 试听）",
+        "search_label": "搜索:",
+        "clear_search_btn": "清除",
+        "only_used_chk": "仅显示被谱面使用的切片",
+        "stop_btn": "■ 停止",
+        "auto_preview_chk": "单击 / 方向键自动试听",
+        "left_count_summary": "显示 {shown} / {total}  已分配 {assigned}",
+        "tag_missing": "[缺失]",
+        "tag_undeclared": "(未声明)",
+        "add_btn": "➜ 加入",
+        "remove_btn": "✖ 移除",
+        "guess_btn": "按文件名猜轨",
+        "clear_all_btn": "清空全部分配",
+        "right_frame_title": "15 Tab 映射（Tab 1–12 鼓 / 13 Other / 14 Guitar / 15 Bass）",
+        "separate_lbd_chk": "单独定义 LBD",
+        "default_bind_label": "默认绑定 WAV (#DTXC_LANEBINDEDCHIP):",
+        "no_bind_label": "(未指定 / 00)",
+        "tab_note_other": "固定分配至 SE6 (通道 66)",
+        "tab_note_guitar": "可选：留空即禁用并自动释放 SE11–SE12",
+        "tab_note_bass": "可选：留空即禁用并自动释放 SE13–SE14",
+        "save_map_btn": "保存映射 JSON...",
+        "load_map_btn": "载入映射 JSON...",
+        "export_frame_title": "导出",
+        "output_dir_label": "输出目录:",
+        "browse_btn": "浏览...",
+        "start_export_btn": "开始导出",
+        "open_output_btn": "打开输出文件夹",
+        "utf8_chk": "导出 UTF-8 编码 (--utf8)",
+        "transcode_ogg_chk": "将保留的 .wav 切片自动转码为 .ogg",
+        "dlevel_label": "鼓难度 (#DLEVEL):",
+        "status_ready": "就绪",
+        "status_bind_updated": "{tab} 默认绑定: {wav}",
+        "status_select_left_first": "请先在左侧列表选择要加入的切片",
+        "status_added_to_tab": "已加入 {added} 个切片到 {tab}",
+        "status_added_skipped_suffix": "（{skipped} 个已分配至其他 Tab，已跳过）",
+        "status_select_right_first": "请先在右侧当前 Tab 选择要移除的切片",
+        "status_removed_from_tab": "已从 {tab} 移除 {removed} 个切片",
+        "status_cleared_all": "已清空全部分配",
+        "status_guessed": "按文件名猜轨：已填充 {total} 个未分配切片（请检查结果）",
+        "status_select_slice_first": "请先选择一个切片",
+        "status_file_missing_no_preview": "[{wav_id}] 文件缺失，无法试听",
+        "status_parsing": "解析中: {name} ...",
+        "status_parse_failed": "解析失败",
+        "status_loaded": "已载入 {name}：{wavs} 个 #WAV，{events} 个音符",
+        "status_exporting": "导出中（离线混音可能需要数十秒）...",
+        "status_export_done": "导出完成: {path}",
+        "status_export_failed": "导出失败",
+        "status_ffmpeg_enabled": "已启用 ffmpeg: {path}",
+        "status_map_saved": "映射已保存: {path}",
+        "status_map_loaded": "映射已载入（{count} 个切片）",
+        "dialog_close_btn": "关闭",
+        "dialog_warnings_title": "谱面警告 ({count})",
+        "dialog_ffmpeg_missing_title": "未找到 ffmpeg",
+        "dialog_ffmpeg_missing_body": (
+            "未在程序目录 / bin 子目录 / 系统 PATH 中找到 ffmpeg.exe。\n\n"
+            "在指定有效的 ffmpeg.exe 之前，以下功能被禁用：\n"
+            "  • 离线混音导出 bgm.ogg\n  • .wav → .ogg 转码\n  • 非 .wav 切片试听\n\n"
+            "请点击右上角“指定 ffmpeg.exe...”，或将 ffmpeg.exe 放在 bms2dtx.exe 旁边 / bin 文件夹。"
+        ),
+        "dialog_ffmpeg_invalid_title": "ffmpeg 无效",
+        "dialog_ffmpeg_invalid_body": "所选文件不是可用的 ffmpeg:\n{exc}",
+        "dialog_file_not_found_title": "文件不存在",
+        "dialog_file_not_found_body": "找不到文件:\n{path}",
+        "dialog_radix_title": "进制提示",
+        "dialog_radix_body": (
+            "检测到 Base-62 谱面或切片总数超过 DTX 36 进制上限 (1295)。\n\n"
+            "v1 GUI 固定使用 Toggle = OFF：只有你选入 15 个 Tab 的切片会保留为独立切片，\n"
+            "其余音符将离线混音为 bgm.ogg。"
+        ),
+        "dialog_clear_title": "清空分配",
+        "dialog_clear_body": "确定清空全部 Tab 的分配？",
+        "dialog_guess_none_body": "没有根据文件名识别出的未分配切片。",
+        "dialog_guess_confirm_body": (
+            "当前已有 {assigned} 个手动分配。\n\n"
+            "将仅为 {total} 个【尚未分配】的切片按文件名填充，已有分配不会被覆盖。继续？"
+        ),
+        "dialog_load_map_title": "载入映射",
+        "dialog_load_map_first_body": "请先导入谱面。",
+        "dialog_save_failed_title": "保存失败",
+        "dialog_load_failed_title": "载入失败",
+        "dialog_map_notes_title": "映射载入提示",
+        "dialog_invalid_out_title": "输出目录无效",
+        "dialog_select_out_title": "输出目录",
+        "dialog_select_out_body": "请选择输出目录。",
+        "dialog_dlevel_err_title": "#DLEVEL",
+        "dialog_dlevel_err_body": "#DLEVEL 必须为非负整数（或留空）。",
+        "dialog_export_no_ffmpeg_body": (
+            "未找到 ffmpeg：将无法离线混音 bgm.ogg，导出的 .dtx 会引用不存在的 bgm.ogg。\n\n"
+            "仍要只导出 .dtx 与保留的切片吗？（选“否”可先去指定 ffmpeg.exe）"
+        ),
+        "dialog_export_done_title": "导出完成",
+        "dialog_open_folder_err_title": "打开文件夹失败",
+        "no_warnings_text": "无警告。",
+        "err_out_same_as_src": "输出目录不能是 BMS 源文件夹本身。请选择一个独立的输出文件夹。（铁律 1：原始 BMS 文件夹只读）",
+        "err_out_in_audio_subdir": "输出目录不能是 BMS 音频所在的子文件夹。（铁律 1：原始 BMS 文件夹只读）",
+        "result_dtx_line": "输出 .dtx: {path}",
+        "result_encoding_line": "DTX 编码: {encoding}",
+        "result_bgm_line": (
+            "bgm.ogg: {path} (时长 {duration:.2f}s, 混入音符 {events}, "
+            "峰值 {peak:.3f}, RMS {rms:.4f}, 缺失 {missing})"
+        ),
+        "result_bgm_none": "bgm.ogg: 未生成",
+        "result_preview_line": "#PREVIEW: {path}",
+        "result_placed_notes": "已放置音符: {count}",
+        "result_copied_transcoded": "复制切片: {copied}   转码 .ogg: {transcoded}",
+        "result_lane_binds": "#DTXC_LANEBINDEDCHIP 行数: {count}",
+        "result_toggle_off_forced": "注意: 已强制 Toggle = OFF",
+        "result_warnings_header": "警告 ({count}):",
+        "preview_no_winsound": "当前系统不支持试听 (winsound 不可用)",
+        "preview_file_missing": "文件不存在，无法试听: {name}",
+        "preview_no_ffmpeg": "未找到 ffmpeg: 无法试听非 .wav 切片 (请指定 ffmpeg.exe)",
+        "preview_decoding": "解码中: {name} ...",
+        "preview_stopped": "已停止",
+        "preview_decode_failed": "解码失败: {exc}",
+        "preview_playing": "正在播放: {name}",
+        "preview_play_failed": "无法播放 {name}: {exc}",
+        "map_note_unknown_tab": "忽略未知 Tab: {tab}",
+        "map_note_undeclared_slice": "忽略当前谱面中未声明的切片: {wav_id}",
+        "map_note_duplicate_slice": "忽略重复分配的切片: {wav_id}",
+        "map_note_unknown_bind_tab": "忽略未知 Tab 的默认绑定: {tab}",
+        "map_note_invalid_bind": "忽略无效默认绑定: {tab} -> {wav_id}",
+        "map_note_toggle_on_ignored": "映射文件含 toggle_on=true，v1 GUI 仅支持 Toggle = OFF，已忽略。",
+    },
+    "en": {
+        "open_bms_btn": "Open .bms / .bme File",
+        "no_chart_selected": "(No chart selected; you can also pass a file via CLI)",
+        "ffmpeg_ok": "ffmpeg: {path}",
+        "ffmpeg_missing_short": "ffmpeg: Not found (bgm.ogg mix / .ogg transcode / non-WAV preview disabled)",
+        "pick_ffmpeg_btn": "Locate ffmpeg.exe...",
+        "lang_label": "Language:",
+        "filetypes_bms": "BMS / BME Charts",
+        "filetypes_all": "All Files",
+        "health_frame_title": "Chart Inspection",
+        "health_placeholder": "Import a chart to view: Title / Artist / BPM / Encoding / Radix / WAV Stats / BGM Columns / Warnings",
+        "view_warnings_btn": "Warnings ({count})",
+        "health_title": "Title",
+        "health_artist": "Artist",
+        "health_bpm": "BPM",
+        "health_encoding": "Encoding",
+        "health_radix": "Radix",
+        "health_wav_count": "WAV Count",
+        "health_wav_value": "Total {total} / Suffix auto-fixed {corrected} / Missing {missing}",
+        "health_bgm_cols": "BGM Columns",
+        "health_bgm_value": "Non-empty B1..Bn: {count} cols / Pruned empty: {pruned}",
+        "health_warnings": "Warnings",
+        "health_warnings_value": "{count} item(s)",
+        "radix_warn_base62": "  ⚠ Base-62 detected, exceeds native DTX Base-36 limit",
+        "radix_warn_limit": "  ⚠ Total slices > 1295 (Toggle = OFF offline bgm.ogg mix locked)",
+        "left_frame_title": "Source #WAV List (Shift/Ctrl multi-select; Click / Arrows / Space to preview)",
+        "search_label": "Search:",
+        "clear_search_btn": "Clear",
+        "only_used_chk": "Show only slices used in chart",
+        "stop_btn": "■ Stop",
+        "auto_preview_chk": "Auto-preview on click / arrow keys",
+        "left_count_summary": "Showing {shown} / {total}  Assigned {assigned}",
+        "tag_missing": "[Missing]",
+        "tag_undeclared": "(Undeclared)",
+        "add_btn": "➜ Add",
+        "remove_btn": "✖ Remove",
+        "guess_btn": "Guess by Filename",
+        "clear_all_btn": "Clear All",
+        "right_frame_title": "15-Tab Mapping (Tabs 1–12 Drums / 13 Other / 14 Guitar / 15 Bass)",
+        "separate_lbd_chk": "Separate LBD",
+        "default_bind_label": "Default Bound WAV (#DTXC_LANEBINDEDCHIP):",
+        "no_bind_label": "(None / 00)",
+        "tab_note_other": "Fixed to SE6 (Channel 66)",
+        "tab_note_guitar": "Optional: leave empty to disable and release SE11–SE12",
+        "tab_note_bass": "Optional: leave empty to disable and release SE13–SE14",
+        "save_map_btn": "Save Mapping JSON...",
+        "load_map_btn": "Load Mapping JSON...",
+        "export_frame_title": "Export",
+        "output_dir_label": "Output Dir:",
+        "browse_btn": "Browse...",
+        "start_export_btn": "Start Export",
+        "open_output_btn": "Open Output Folder",
+        "utf8_chk": "Export UTF-8 encoding (--utf8)",
+        "transcode_ogg_chk": "Transcode retained .wav slices to .ogg",
+        "dlevel_label": "Drums Level (#DLEVEL):",
+        "status_ready": "Ready",
+        "status_bind_updated": "{tab} default bind: {wav}",
+        "status_select_left_first": "Please select slice(s) in the left list first",
+        "status_added_to_tab": "Added {added} slice(s) to {tab}",
+        "status_added_skipped_suffix": " ({skipped} already assigned to other Tabs, skipped)",
+        "status_select_right_first": "Please select slice(s) in the current Tab first",
+        "status_removed_from_tab": "Removed {removed} slice(s) from {tab}",
+        "status_cleared_all": "Cleared all assignments",
+        "status_guessed": "Guessed {total} unassigned slice(s) by filename (please review)",
+        "status_select_slice_first": "Please select a slice first",
+        "status_file_missing_no_preview": "[{wav_id}] File missing, cannot preview",
+        "status_parsing": "Parsing: {name} ...",
+        "status_parse_failed": "Parse failed",
+        "status_loaded": "Loaded {name}: {wavs} #WAVs, {events} notes",
+        "status_exporting": "Exporting (offline mixing may take a few seconds)...",
+        "status_export_done": "Export complete: {path}",
+        "status_export_failed": "Export failed",
+        "status_ffmpeg_enabled": "Enabled ffmpeg: {path}",
+        "status_map_saved": "Mapping saved: {path}",
+        "status_map_loaded": "Mapping loaded ({count} slice(s))",
+        "dialog_close_btn": "Close",
+        "dialog_warnings_title": "Chart Warnings ({count})",
+        "dialog_ffmpeg_missing_title": "ffmpeg Not Found",
+        "dialog_ffmpeg_missing_body": (
+            "ffmpeg.exe was not found in the app folder, bin/ subfolder, or system PATH.\n\n"
+            "Until a valid ffmpeg.exe is specified, the following features are disabled:\n"
+            "  • Offline bgm.ogg mixing\n  • .wav → .ogg transcoding\n  • Non-.wav slice preview\n\n"
+            "Click 'Locate ffmpeg.exe...' at the top right, or place ffmpeg.exe beside bms2dtx.exe / in bin/."
+        ),
+        "dialog_ffmpeg_invalid_title": "Invalid ffmpeg",
+        "dialog_ffmpeg_invalid_body": "Selected file is not a valid ffmpeg executable:\n{exc}",
+        "dialog_file_not_found_title": "File Not Found",
+        "dialog_file_not_found_body": "Could not find file:\n{path}",
+        "dialog_radix_title": "Radix Notice",
+        "dialog_radix_body": (
+            "Detected a Base-62 chart or total slices exceeding the DTX Base-36 limit (1295).\n\n"
+            "v1 GUI uses Toggle = OFF: only slices mapped into the 15 Tabs are kept as individual files; "
+            "remaining notes are offline-mixed into bgm.ogg."
+        ),
+        "dialog_clear_title": "Clear All",
+        "dialog_clear_body": "Clear all Tab assignments?",
+        "dialog_guess_none_body": "No unassigned slices could be guessed from filenames.",
+        "dialog_guess_confirm_body": (
+            "There are currently {assigned} manual assignment(s).\n\n"
+            "Only {total} unassigned slice(s) will be filled by filename; existing assignments will not be overwritten. Continue?"
+        ),
+        "dialog_load_map_title": "Load Mapping",
+        "dialog_load_map_first_body": "Please import a chart first.",
+        "dialog_save_failed_title": "Save Failed",
+        "dialog_load_failed_title": "Load Failed",
+        "dialog_map_notes_title": "Mapping Load Notes",
+        "dialog_invalid_out_title": "Invalid Output Directory",
+        "dialog_select_out_title": "Output Directory",
+        "dialog_select_out_body": "Please select an output directory.",
+        "dialog_dlevel_err_title": "#DLEVEL",
+        "dialog_dlevel_err_body": "#DLEVEL must be a non-negative integer (or empty).",
+        "dialog_export_no_ffmpeg_body": (
+            "ffmpeg not found: bgm.ogg cannot be rendered, and the exported .dtx will reference a non-existent bgm.ogg.\n\n"
+            "Export .dtx and retained slices anyway? (Choose 'No' to locate ffmpeg.exe first)"
+        ),
+        "dialog_export_done_title": "Export Complete",
+        "dialog_open_folder_err_title": "Failed to Open Folder",
+        "no_warnings_text": "No warnings.",
+        "err_out_same_as_src": "Output directory cannot be the BMS source folder itself. Please choose a separate folder. (Rule 1: original BMS folder is read-only)",
+        "err_out_in_audio_subdir": "Output directory cannot be a BMS audio subfolder. (Rule 1: original BMS folder is read-only)",
+        "result_dtx_line": "Output .dtx: {path}",
+        "result_encoding_line": "DTX Encoding: {encoding}",
+        "result_bgm_line": (
+            "bgm.ogg: {path} (duration {duration:.2f}s, mixed notes {events}, "
+            "peak {peak:.3f}, RMS {rms:.4f}, missing {missing})"
+        ),
+        "result_bgm_none": "bgm.ogg: Not generated",
+        "result_preview_line": "#PREVIEW: {path}",
+        "result_placed_notes": "Placed notes: {count}",
+        "result_copied_transcoded": "Copied slices: {copied}   Transcoded .ogg: {transcoded}",
+        "result_lane_binds": "#DTXC_LANEBINDEDCHIP lines: {count}",
+        "result_toggle_off_forced": "Note: Toggle = OFF was forced",
+        "result_warnings_header": "Warnings ({count}):",
+        "preview_no_winsound": "Audio preview not supported on this OS (winsound unavailable)",
+        "preview_file_missing": "File not found, cannot preview: {name}",
+        "preview_no_ffmpeg": "ffmpeg not found: cannot preview non-.wav slices (please locate ffmpeg.exe)",
+        "preview_decoding": "Decoding: {name} ...",
+        "preview_stopped": "Stopped",
+        "preview_decode_failed": "Decode failed: {exc}",
+        "preview_playing": "Playing: {name}",
+        "preview_play_failed": "Cannot play {name}: {exc}",
+        "map_note_unknown_tab": "Ignored unknown Tab: {tab}",
+        "map_note_undeclared_slice": "Ignored slice not declared in current chart: {wav_id}",
+        "map_note_duplicate_slice": "Ignored duplicate slice assignment: {wav_id}",
+        "map_note_unknown_bind_tab": "Ignored default bind for unknown Tab: {tab}",
+        "map_note_invalid_bind": "Ignored invalid default bind: {tab} -> {wav_id}",
+        "map_note_toggle_on_ignored": "Mapping file has toggle_on=true; v1 GUI supports Toggle = OFF only (ignored).",
+    },
+    "ja": {
+        "open_bms_btn": ".bms / .bme ファイルを選択",
+        "no_chart_selected": "（譜面未選択・コマンドライン引数での指定も可能）",
+        "ffmpeg_ok": "ffmpeg: {path}",
+        "ffmpeg_missing_short": "ffmpeg: 未検出（bgm.ogg ミックス / .ogg 変換 / 非WAV試聴は無効）",
+        "pick_ffmpeg_btn": "ffmpeg.exe を指定...",
+        "lang_label": "言語:",
+        "filetypes_bms": "BMS / BME 譜面",
+        "filetypes_all": "すべてのファイル",
+        "health_frame_title": "譜面チェック",
+        "health_placeholder": "譜面を読み込むと表示されます：タイトル / アーティスト / BPM / 文字コード / 基数 / WAV統計 / BGM列 / 警告",
+        "view_warnings_btn": "警告を表示 ({count})",
+        "health_title": "タイトル",
+        "health_artist": "アーティスト",
+        "health_bpm": "BPM",
+        "health_encoding": "文字コード",
+        "health_radix": "基数",
+        "health_wav_count": "WAV 数",
+        "health_wav_value": "計 {total} / 拡張子メモリ補正 {corrected} / 欠損 {missing}",
+        "health_bgm_cols": "BGM 列",
+        "health_bgm_value": "非空 B1..Bn 計 {count} 列 / 空トラック除外 {pruned}",
+        "health_warnings": "警告",
+        "health_warnings_value": "{count} 件",
+        "radix_warn_base62": "  ⚠ 62進数を検出（DTX標準の36進数上限を超過）",
+        "radix_warn_limit": "  ⚠ スライス総数 > 1295（Toggle = OFF で bgm.ogg にオフラインミックス）",
+        "left_frame_title": "元 #WAV リスト（Shift/Ctrl 複数選択；クリック / 矢印 / Space で試聴）",
+        "search_label": "検索:",
+        "clear_search_btn": "クリア",
+        "only_used_chk": "譜面で使用されているスライスのみ表示",
+        "stop_btn": "■ 停止",
+        "auto_preview_chk": "クリック / 矢印キーで自動試聴",
+        "left_count_summary": "表示 {shown} / {total}  割当済 {assigned}",
+        "tag_missing": "[欠損]",
+        "tag_undeclared": "(未定義)",
+        "add_btn": "➜ 追加",
+        "remove_btn": "✖ 削除",
+        "guess_btn": "ファイル名で自動割当",
+        "clear_all_btn": "すべてクリア",
+        "right_frame_title": "15 Tab マッピング（Tab 1–12 ドラム / 13 Other / 14 Guitar / 15 Bass）",
+        "separate_lbd_chk": "LBD を個別定義",
+        "default_bind_label": "デフォルトバインド WAV (#DTXC_LANEBINDEDCHIP):",
+        "no_bind_label": "(未指定 / 00)",
+        "tab_note_other": "SE6 (チャンネル 66) に固定割当",
+        "tab_note_guitar": "任意：空欄で無効化（SE11–SE12 を自動解放）",
+        "tab_note_bass": "任意：空欄で無効化（SE13–SE14 を自動解放）",
+        "save_map_btn": "マッピング JSON を保存...",
+        "load_map_btn": "マッピング JSON を読込...",
+        "export_frame_title": "エクスポート",
+        "output_dir_label": "出力先フォルダ:",
+        "browse_btn": "参照...",
+        "start_export_btn": "エクスポート開始",
+        "open_output_btn": "出力フォルダを開く",
+        "utf8_chk": "UTF-8 で出力 (--utf8)",
+        "transcode_ogg_chk": "保持した .wav スライスを .ogg に自動変換",
+        "dlevel_label": "ドラム難易度 (#DLEVEL):",
+        "status_ready": "準備完了",
+        "status_bind_updated": "{tab} デフォルトバインド: {wav}",
+        "status_select_left_first": "左リストから追加するスライスを選択してください",
+        "status_added_to_tab": "{tab} に {added} 個のスライスを追加しました",
+        "status_added_skipped_suffix": "（他 Tab に割当済の {skipped} 個をスキップ）",
+        "status_select_right_first": "現在の Tab から削除するスライスを選択してください",
+        "status_removed_from_tab": "{tab} から {removed} 個のスライスを削除しました",
+        "status_cleared_all": "すべての割当をクリアしました",
+        "status_guessed": "ファイル名から {total} 個の未割当スライスを自動割当しました",
+        "status_select_slice_first": "スライスを選択してください",
+        "status_file_missing_no_preview": "[{wav_id}] ファイル欠損のため試聴できません",
+        "status_parsing": "解析中: {name} ...",
+        "status_parse_failed": "解析失敗",
+        "status_loaded": "{name} を読込完了：{wavs} 個の #WAV、{events} ノーツ",
+        "status_exporting": "エクスポート中（オフラインミックスには数十秒かかる場合があります）...",
+        "status_export_done": "エクスポート完了: {path}",
+        "status_export_failed": "エクスポート失敗",
+        "status_ffmpeg_enabled": "ffmpeg を有効化: {path}",
+        "status_map_saved": "マッピングを保存しました: {path}",
+        "status_map_loaded": "マッピングを読込完了（{count} スライス）",
+        "dialog_close_btn": "閉じる",
+        "dialog_warnings_title": "譜面警告 ({count})",
+        "dialog_ffmpeg_missing_title": "ffmpeg が見つかりません",
+        "dialog_ffmpeg_missing_body": (
+            "アプリフォルダ / bin サブフォルダ / システム PATH に ffmpeg.exe が見つかりません。\n\n"
+            "有効な ffmpeg.exe を指定するまで、以下の機能は無効になります：\n"
+            "  • bgm.ogg のオフラインミックス出力\n  • .wav → .ogg 自動変換\n  • 非 .wav スライスの試聴\n\n"
+            "右上の「ffmpeg.exe を指定...」をクリックするか、bms2dtx.exe の隣または bin フォルダに配置してください。"
+        ),
+        "dialog_ffmpeg_invalid_title": "無効な ffmpeg",
+        "dialog_ffmpeg_invalid_body": "選択されたファイルは有効な ffmpeg ではありません:\n{exc}",
+        "dialog_file_not_found_title": "ファイルが見つかりません",
+        "dialog_file_not_found_body": "ファイルが見つかりません:\n{path}",
+        "dialog_radix_title": "基数に関する通知",
+        "dialog_radix_body": (
+            "Base-62 譜面、またはスライス総数が DTX 36進数上限 (1295) を超えています。\n\n"
+            "v1 GUI は Toggle = OFF 固定です：15 個の Tab に割り当てたスライスのみ個別ファイルとして保持され、"
+            "残りのノーツは bgm.ogg にオフラインミックスされます。"
+        ),
+        "dialog_clear_title": "すべてクリア",
+        "dialog_clear_body": "すべての Tab の割当をクリアしますか？",
+        "dialog_guess_none_body": "ファイル名から判別できる未割当スライスはありませんでした。",
+        "dialog_guess_confirm_body": (
+            "現在 {assigned} 個の手動割当があります。\n\n"
+            "未割当の {total} 個のみファイル名で自動割当します（既存の割当は上書きされません）。続行しますか？"
+        ),
+        "dialog_load_map_title": "マッピング読込",
+        "dialog_load_map_first_body": "先に譜面を読み込んでください。",
+        "dialog_save_failed_title": "保存失敗",
+        "dialog_load_failed_title": "読込失敗",
+        "dialog_map_notes_title": "マッピング読込通知",
+        "dialog_invalid_out_title": "無効な出力先フォルダ",
+        "dialog_select_out_title": "出力先フォルダ",
+        "dialog_select_out_body": "出力先フォルダを選択してください。",
+        "dialog_dlevel_err_title": "#DLEVEL",
+        "dialog_dlevel_err_body": "#DLEVEL には 0 以上の整数を入力してください（空欄可）。",
+        "dialog_export_no_ffmpeg_body": (
+            "ffmpeg が見つからないため bgm.ogg を生成できません（出力される .dtx は存在しない bgm.ogg を参照します）。\n\n"
+            ".dtx と保持スライスのみエクスポートしますか？（「いいえ」で先に ffmpeg.exe を指定できます）"
+        ),
+        "dialog_export_done_title": "エクスポート完了",
+        "dialog_open_folder_err_title": "フォルダを開けませんでした",
+        "no_warnings_text": "警告はありません。",
+        "err_out_same_as_src": "出力先に BMS 元フォルダ自体は指定できません。別のフォルダを選択してください。（鉄則 1：元 BMS フォルダは読み取り専用）",
+        "err_out_in_audio_subdir": "出力先に BMS 音声サブフォルダは指定できません。（鉄則 1：元 BMS フォルダは読み取り専用）",
+        "result_dtx_line": "出力 .dtx: {path}",
+        "result_encoding_line": "DTX 文字コード: {encoding}",
+        "result_bgm_line": (
+            "bgm.ogg: {path} (長さ {duration:.2f}s, ミックスノーツ {events}, "
+            "ピーク {peak:.3f}, RMS {rms:.4f}, 欠損 {missing})"
+        ),
+        "result_bgm_none": "bgm.ogg: 未生成",
+        "result_preview_line": "#PREVIEW: {path}",
+        "result_placed_notes": "配置ノーツ数: {count}",
+        "result_copied_transcoded": "スライスコピー: {copied}   .ogg 変換: {transcoded}",
+        "result_lane_binds": "#DTXC_LANEBINDEDCHIP 行数: {count}",
+        "result_toggle_off_forced": "注意: Toggle = OFF が強制適用されました",
+        "result_warnings_header": "警告 ({count}):",
+        "preview_no_winsound": "現在の環境では試聴がサポートされていません (winsound 利用不可)",
+        "preview_file_missing": "ファイルが存在しないため試聴できません: {name}",
+        "preview_no_ffmpeg": "ffmpeg 未検出: 非 .wav スライスを試聴できません (ffmpeg.exe を指定してください)",
+        "preview_decoding": "デコード中: {name} ...",
+        "preview_stopped": "停止しました",
+        "preview_decode_failed": "デコード失敗: {exc}",
+        "preview_playing": "再生中: {name}",
+        "preview_play_failed": "{name} を再生できません: {exc}",
+        "map_note_unknown_tab": "不明な Tab を無視しました: {tab}",
+        "map_note_undeclared_slice": "現在の譜面で未定義のスライスを無視しました: {wav_id}",
+        "map_note_duplicate_slice": "重複割当されたスライスを無視しました: {wav_id}",
+        "map_note_unknown_bind_tab": "不明な Tab のデフォルトバインドを無視しました: {tab}",
+        "map_note_invalid_bind": "無効なデフォルトバインドを無視しました: {tab} -> {wav_id}",
+        "map_note_toggle_on_ignored": "マッピングファイルに toggle_on=true が含まれていますが、v1 GUI は Toggle = OFF 専用のため無視しました。",
+    },
+}
+
+
+def get_language() -> str:
+    """Return the active language code ('zh_CN', 'en', or 'ja')."""
+    return _current_language
+
+
+def set_language(lang: str) -> str:
+    """Set active language code (accepts code or display label). Falls back to zh_CN if unknown."""
+    global _current_language
+    cleaned = lang.strip()
+    if cleaned in LABEL_TO_LANGUAGE:
+        cleaned = LABEL_TO_LANGUAGE[cleaned]
+    if cleaned not in TRANSLATIONS:
+        cleaned = DEFAULT_LANGUAGE
+    _current_language = cleaned
+    return _current_language
+
+
+def tr(key: str, *, lang: Optional[str] = None, **kwargs: Any) -> str:
+    """Translate ``key`` into ``lang`` (or current active language) and format optional kwargs."""
+    active = lang if (lang and lang in TRANSLATIONS) else _current_language
+    table = TRANSLATIONS.get(active, TRANSLATIONS[DEFAULT_LANGUAGE])
+    template = table.get(key, TRANSLATIONS[DEFAULT_LANGUAGE].get(key, key))
+    if kwargs:
+        return template.format(**kwargs)
+    return template
+
+
+def get_default_config_path() -> Path:
+    """Return user-local settings JSON path (never inside any BMS folder)."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "bms2dtx" / "settings.json"
+    return Path.home() / ".bms2dtx" / "settings.json"
+
+
+def load_language_preference(config_path: Optional[Path | str] = None) -> str:
+    """Load saved language code from disk; returns DEFAULT_LANGUAGE if not found or invalid."""
+    target = Path(config_path) if config_path is not None else get_default_config_path()
+    try:
+        if target.is_file():
+            data = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                lang = str(data.get("language", DEFAULT_LANGUAGE)).strip()
+                if lang in TRANSLATIONS:
+                    return lang
+    except Exception:
+        pass
+    return DEFAULT_LANGUAGE
+
+
+def save_language_preference(lang: str, config_path: Optional[Path | str] = None) -> bool:
+    """Persist language preference to local settings JSON."""
+    target = Path(config_path) if config_path is not None else get_default_config_path()
+    norm_lang = lang if lang in TRANSLATIONS else DEFAULT_LANGUAGE
+    try:
+        existing: Dict[str, Any] = {}
+        if target.is_file():
+            try:
+                loaded = json.loads(target.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:
+                existing = {}
+        existing["language"] = norm_lang
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False

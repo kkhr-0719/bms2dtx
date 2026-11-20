@@ -1,0 +1,43 @@
+# Virtual environments & build artifacts
+.venv_build/
+.venv/
+venv/
+build/
+dist/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# OS & editor junk
+.DS_Store
+Thumbs.db
+.Rhistory
+
+# Local export outputs & binary/media/chart assets
+*_dtx/
+*.exe
+*.wav
+*.ogg
+*.mp3
+*.mp4
+*.flac
+*.xa
+*.avi
+*.wmv
+*.mpg
+*.mpeg
+*.webm
+*.mkv
+*.bms
+*.bme
+*.bml
+*.pms
+*.dtx
+*.def
+
+# Local copyrighted test song directories
+Ivory \[Snowyplane\]/
+Caravan \[APPROVED DTX\]/
+desktop.ini
