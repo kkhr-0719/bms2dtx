@@ -390,6 +390,76 @@ class TestStopAndRandomWarnings(unittest.TestCase):
                 [(2, "02"), (3, "01"), (4, "03"), (6, "04"), (7, "04")],
             )
 
+    def test_pms_9key_18_channels_and_bml_lntype1_lntype2_lnobj_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # 1) .pms covering all 11-19 & 21-29 (18 visible channels)
+            lines = ["#TITLE PMS9Key", "#BPM 120", "#WAV01 a.wav", "#WAV02 b.wav"]
+            channels_18 = [f"1{i}" for i in range(1, 10)] + [f"2{i}" for i in range(1, 10)]
+            for idx, ch in enumerate(channels_18):
+                wid = "01" if idx < 9 else "02"
+                lines.append(f"#001{ch}:{wid}")
+            pms = root / "nine_key.pms"
+            pms.write_text("\n".join(lines), encoding="utf-8")
+            chart_pms = parse_bms(pms)
+            self.assertEqual({e.channel for e in chart_pms.events}, set(channels_18))
+            self.assertEqual(chart_pms.wavs["01"].use_count, 9)
+            self.assertEqual(chart_pms.wavs["02"].use_count, 9)
+
+            # 2) .bml #LNTYPE 1 + #LNOBJ: LN start counted, LN end & LNOBJ end silent & excluded from use_count
+            bml1 = root / "hold1.bml"
+            bml1.write_text(
+                "\n".join(
+                    [
+                        "#TITLE BML1",
+                        "#BPM 120",
+                        "#LNTYPE 1",
+                        "#LNOBJ ZZ",
+                        "#WAV01 start_ch51.wav",
+                        "#WAV02 start_ch69.wav",
+                        "#WAV03 body_obj.wav",
+                        "#WAVZZ end_obj.wav",
+                        "#00151:0100",
+                        "#00251:0100",
+                        "#00169:0200",
+                        "#00269:0200",
+                        "#00111:03ZZ",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            c1 = parse_bms(bml1)
+            self.assertEqual([(e.channel, e.wav_id, e.is_ln_end) for e in c1.events], [
+                ("51", "01", False),
+                ("69", "02", False),
+                ("11", "03", False),
+            ])
+            self.assertEqual(len(c1.ln_end_events), 3)
+            self.assertTrue(all(e.is_ln_end for e in c1.ln_end_events))
+            self.assertEqual(c1.wavs["01"].use_count, 1)
+            self.assertEqual(c1.wavs["02"].use_count, 1)
+            self.assertEqual(c1.wavs["03"].use_count, 1)
+            self.assertEqual(c1.wavs["ZZ"].use_count, 0)
+
+            # 3) .bml #LNTYPE 2: contiguous identical WAV triggers once, tail tokens marked as ln_end
+            bml2 = root / "hold2.bml"
+            bml2.write_text(
+                "\n".join(
+                    [
+                        "#TITLE BML2",
+                        "#BPM 120",
+                        "#LNTYPE 2",
+                        "#WAV01 hold.wav",
+                        "#00151:01010100",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            c2 = parse_bms(bml2)
+            self.assertEqual(len(c2.events), 1)
+            self.assertEqual(c2.wavs["01"].use_count, 1)
+            self.assertEqual(len(c2.ln_end_events), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

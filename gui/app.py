@@ -669,8 +669,6 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_id: Optional[str] = root.after(80, self._poll_queue)
 
-        if self.startup_dialogs and self.ffmpeg_path is None:
-            root.after(300, self._warn_ffmpeg_missing)
         if initial_path:
             root.after(150, lambda: self.load_bms(initial_path))
 
@@ -737,7 +735,7 @@ class App:
         self.root.minsize(min(int(960 * scale), width), min(int(640 * scale), height))
 
     def _setup_windows_drag_drop(self) -> None:
-        """Register native Win32 WM_DROPFILES via ctypes (supports Unicode CJK paths)."""
+        """Register 64-bit-safe native Win32 WM_DROPFILES hook via ctypes."""
         if sys.platform != "win32":
             return
         try:
@@ -752,72 +750,86 @@ class App:
             user32 = ctypes.windll.user32
             shell32 = ctypes.windll.shell32
 
-            user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
-            user32.GetAncestor.restype = wintypes.HWND
-            top_hwnd = user32.GetAncestor(wintypes.HWND(raw_hwnd), 2) or raw_hwnd  # GA_ROOT = 2
+            handle_t = ctypes.c_void_p
+            lresult_t = ctypes.c_ssize_t
+            wparam_t = ctypes.c_size_t
+            lparam_t = ctypes.c_ssize_t
 
-            shell32.DragAcceptFiles.argtypes = (wintypes.HWND, wintypes.BOOL)
+            user32.GetParent.argtypes = (handle_t,)
+            user32.GetParent.restype = handle_t
+            parent_hwnd = user32.GetParent(handle_t(raw_hwnd))
+            top_hwnd = int(parent_hwnd) if parent_hwnd else int(raw_hwnd)
+
+            shell32.DragAcceptFiles.argtypes = (handle_t, wintypes.BOOL)
             shell32.DragAcceptFiles.restype = None
             shell32.DragQueryFileW.argtypes = (
-                wintypes.HANDLE,
+                handle_t,
                 wintypes.UINT,
                 wintypes.LPWSTR,
                 wintypes.UINT,
             )
             shell32.DragQueryFileW.restype = wintypes.UINT
-            shell32.DragFinish.argtypes = (wintypes.HANDLE,)
+            shell32.DragFinish.argtypes = (handle_t,)
             shell32.DragFinish.restype = None
 
-            long_ptr_t = ctypes.c_ssize_t
             wndproc_t = ctypes.WINFUNCTYPE(
-                long_ptr_t, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, long_ptr_t
+                lresult_t, handle_t, wintypes.UINT, wparam_t, lparam_t
             )
             set_wndproc = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
-            set_wndproc.argtypes = (wintypes.HWND, ctypes.c_int, long_ptr_t)
-            set_wndproc.restype = long_ptr_t
+            set_wndproc.argtypes = (handle_t, ctypes.c_int, handle_t)
+            set_wndproc.restype = handle_t
             call_wndproc = user32.CallWindowProcW
             call_wndproc.argtypes = (
-                long_ptr_t,
-                wintypes.HWND,
+                handle_t,
+                handle_t,
                 wintypes.UINT,
-                ctypes.c_size_t,
-                long_ptr_t,
+                wparam_t,
+                lparam_t,
             )
-            call_wndproc.restype = long_ptr_t
+            call_wndproc.restype = lresult_t
+            def_wndproc = user32.DefWindowProcW
+            def_wndproc.argtypes = (handle_t, wintypes.UINT, wparam_t, lparam_t)
+            def_wndproc.restype = lresult_t
 
             gwlp_wndproc = -4
             wm_dropfiles = 0x0233
-            shell32.DragAcceptFiles(wintypes.HWND(top_hwnd), True)
+            shell32.DragAcceptFiles(handle_t(top_hwnd), True)
 
             def _wndproc(hwnd: Any, msg: int, wparam: int, lparam: int) -> int:
-                if msg == wm_dropfiles:
-                    hdrop = wintypes.HANDLE(wparam)
-                    paths: List[str] = []
-                    try:
-                        count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
-                        for idx in range(count):
-                            buf_len = shell32.DragQueryFileW(hdrop, idx, None, 0)
-                            buf = ctypes.create_unicode_buffer(buf_len + 2)
-                            shell32.DragQueryFileW(hdrop, idx, buf, buf_len + 2)
-                            if buf.value:
-                                paths.append(buf.value)
-                    finally:
-                        shell32.DragFinish(hdrop)
-                    if paths:
-                        self.root.after(0, lambda dropped=paths: self._handle_dropped_files(dropped))
+                try:
+                    if msg == wm_dropfiles:
+                        hdrop = handle_t(wparam)
+                        paths: List[str] = []
+                        try:
+                            count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+                            for idx in range(count):
+                                buf_len = shell32.DragQueryFileW(hdrop, idx, None, 0)
+                                if buf_len > 0:
+                                    buf = ctypes.create_unicode_buffer(buf_len + 2)
+                                    shell32.DragQueryFileW(hdrop, idx, buf, buf_len + 2)
+                                    if buf.value:
+                                        paths.append(buf.value)
+                        finally:
+                            shell32.DragFinish(hdrop)
+                        if paths:
+                            self.root.after(
+                                0, lambda dropped=paths: self._handle_dropped_files(dropped)
+                            )
+                        return 0
+                    orig = self._orig_wndproc
+                    if orig:
+                        return int(call_wndproc(handle_t(orig), hwnd, msg, wparam, lparam))
+                    return int(def_wndproc(hwnd, msg, wparam, lparam))
+                except Exception:
                     return 0
-                orig = self._orig_wndproc
-                if orig:
-                    return int(call_wndproc(orig, hwnd, msg, wparam, lparam))
-                return 0
 
             cb = wndproc_t(_wndproc)
             cb_addr = ctypes.cast(cb, ctypes.c_void_p).value
-            if cb_addr is None:
+            if not cb_addr:
                 return
-            orig_proc = set_wndproc(wintypes.HWND(top_hwnd), gwlp_wndproc, long_ptr_t(cb_addr))
+            orig_proc = set_wndproc(handle_t(top_hwnd), gwlp_wndproc, handle_t(cb_addr))
             self._dnd_hwnd = int(top_hwnd)
-            self._orig_wndproc = int(orig_proc)
+            self._orig_wndproc = int(orig_proc) if orig_proc else None
             self._wndproc_ref = cb
             self._set_wndproc_fn = set_wndproc
         except Exception:
@@ -829,12 +841,11 @@ class App:
         if self._dnd_hwnd and self._orig_wndproc and self._set_wndproc_fn:
             try:
                 import ctypes
-                from ctypes import wintypes
 
                 self._set_wndproc_fn(
-                    wintypes.HWND(self._dnd_hwnd),
+                    ctypes.c_void_p(self._dnd_hwnd),
                     -4,
-                    ctypes.c_ssize_t(self._orig_wndproc),
+                    ctypes.c_void_p(self._orig_wndproc),
                 )
             except Exception:
                 pass
@@ -846,7 +857,7 @@ class App:
         if not paths or self._busy:
             return
         candidate = Path(paths[0])
-        if candidate.is_dir() or candidate.suffix.lower() not in (".bms", ".bme", ".bml"):
+        if candidate.is_dir() or candidate.suffix.lower() not in (".bms", ".bme", ".bml", ".pms"):
             messagebox.showwarning(
                 tr("dialog_drop_invalid_title"),
                 tr("dialog_drop_invalid_body", name=candidate.name or str(candidate)),
@@ -1373,7 +1384,7 @@ class App:
                 ff_status_lbl.configure(foreground=OK_GREEN)
             else:
                 ff_status_var.set(tr("ffmpeg_missing_short"))
-                ff_status_lbl.configure(foreground=ERROR_RED)
+                ff_status_lbl.configure(foreground="#555555")
 
         _refresh_ff_dialog()
 
@@ -1717,13 +1728,8 @@ class App:
         self._update_ffmpeg_ui()
 
     def _update_ffmpeg_ui(self) -> None:
-        if self.ffmpeg_path:
-            self.ffmpeg_warn_btn.grid_remove()
-            self.ogg_chk.configure(state="normal")
-        else:
-            self.ffmpeg_warn_btn.grid()
-            self.ogg_var.set(False)
-            self.ogg_chk.configure(state="disabled")
+        self.ffmpeg_warn_btn.grid_remove()
+        self.ogg_chk.configure(state="normal")
 
     def _warn_ffmpeg_missing(self) -> None:
         if self._ffmpeg_warned or self.ffmpeg_path is not None:
@@ -1761,7 +1767,7 @@ class App:
     # --------------------------------------------------------------- load chart
     def on_choose_file(self) -> None:
         filetypes = [
-            (tr("filetypes_bms"), "*.bms *.bme *.bml"),
+            (tr("filetypes_bms"), "*.bms *.bme *.bml *.pms"),
             (tr("filetypes_all"), "*.*"),
         ]
         path = filedialog.askopenfilename(
@@ -2283,14 +2289,13 @@ class App:
             return
 
         render_bgm = True
-        if self.ffmpeg_path is None:
+        if self.selected_image_mode() == IMAGE_MODE_RESIZE and self.ffmpeg_path is None:
             if not messagebox.askyesno(
                 tr("dialog_ffmpeg_missing_title"),
-                tr("dialog_export_no_ffmpeg_body"),
+                tr("dialog_export_resize_no_ffmpeg_body"),
                 parent=self.root,
             ):
                 return
-            render_bgm = False
 
         lp_panel = self.panels.get(TabId.LP)
         if lp_panel is not None:
@@ -2301,7 +2306,7 @@ class App:
         options = ConversionOptions(
             output_dir=out_dir,
             utf8=self.utf8_var.get(),
-            transcode_wav_to_ogg=bool(self.ogg_var.get() and self.ffmpeg_path),
+            transcode_wav_to_ogg=bool(self.ogg_var.get()),
             dlevel=dlevel,
             ffmpeg_path=self.ffmpeg_path,
             render_bgm=render_bgm,

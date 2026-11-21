@@ -915,7 +915,9 @@ class AppIntegrationTests(ChartCase):
         app = self.app
         app.ffmpeg_path = None
         app._update_ffmpeg_ui()
-        self.assertEqual(str(app.ogg_chk.cget("state")), "disabled")
+        # v0.4.0: built-in soundfile enables .ogg transcode & bgm.ogg mixing even without ffmpeg
+        self.assertEqual(str(app.ogg_chk.cget("state")), "normal")
+        self.assertEqual(app.ffmpeg_warn_btn.winfo_manager(), "")
         app.left_tree.selection_set(("01",))
         app.select_tab(TabId.BD)
         app.on_add()
@@ -957,7 +959,7 @@ class AppIntegrationTests(ChartCase):
         from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
         from gui.i18n import TRANSLATIONS, get_language, tr
 
-        self.assertEqual(APP_VERSION, "0.3.0")
+        self.assertEqual(APP_VERSION, "0.4.0")
 
         # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
         base_keys = set(TRANSLATIONS["zh_CN"].keys())
@@ -986,7 +988,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(loc_present[1], "__bms2dtx.json")
 
         # 3) Verify GUI title bar, TabId.LP dual-row widgets, Spinbox enable/disable, 1000ms tooltip, Undo/Redo.
-        self.assertTrue(self.root.title().startswith("bms2dtx 0.3.0"))
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.0"))
         self.app.select_tab(TabId.LP)
         self.root.update()
 
@@ -1045,6 +1047,179 @@ class AppIntegrationTests(ChartCase):
         self.root.update()
         self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_NONE)
         self.assertFalse(self.app.dirty)
+
+    def test_v040_preview_wasapi_shared_and_device_error_degradation(self) -> None:
+        import math
+        import struct
+        import wave
+        import numpy as np
+
+        class _FakeWasapiSettings:
+            def __init__(self, *, exclusive: bool = True) -> None:
+                self.exclusive = exclusive
+
+        class _FakeSoundDevice:
+            WasapiSettings = _FakeWasapiSettings
+
+            def __init__(self, *, fail_no_device: bool = False) -> None:
+                self.fail_no_device = fail_no_device
+                self.played: list[tuple[np.ndarray, dict]] = []
+                self.stopped = 0
+
+            def query_hostapis(self):
+                if self.fail_no_device:
+                    return [{"name": "MME", "default_output_device": -1}]
+                return [
+                    {"name": "MME", "default_output_device": 0},
+                    {"name": "Windows WASAPI", "default_output_device": 2},
+                ]
+
+            def query_devices(self, idx=None):
+                if self.fail_no_device:
+                    return [] if idx is None else {"max_output_channels": 0}
+                if idx is None:
+                    return [{"max_output_channels": 2}] * 3
+                return {"max_output_channels": 2}
+
+            @property
+            def default(self):
+                class _Def:
+                    device = (-1, -1)
+                return _Def()
+
+            def stop(self) -> None:
+                self.stopped += 1
+
+            def play(self, arr, **kwargs) -> None:
+                self.played.append((arr.copy(), kwargs))
+
+        stereo_wav = self.tmp / "stereo_lr.wav"
+        sr = 44100
+        with wave.open(str(stereo_wav), "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            frames = bytearray()
+            for i in range(441):
+                left = int(12000 * math.sin(2 * math.pi * 440 * i / sr))
+                right = 0
+                frames.extend(struct.pack("<hh", left, right))
+            wf.writeframes(bytes(frames))
+
+        fake_sd = _FakeSoundDevice()
+        statuses: List[str] = []
+        swap_flag = [True]
+        player = PreviewPlayer(
+            lambda: None,  # No ffmpeg at all!
+            on_status=statuses.append,
+            winsound_module=None,
+            swap_lr_getter=lambda: swap_flag[0],
+            sounddevice_module=fake_sd,
+        )
+        self.addCleanup(player.shutdown)
+        self.assertTrue(player.available)
+        self.assertTrue(player.play(stereo_wav))
+        player._last_thread.join(5)
+
+        self.assertEqual(len(fake_sd.played), 1)
+        arr, kwargs = fake_sd.played[0]
+        self.assertEqual(kwargs["device"], 2)  # Explicit Windows WASAPI device
+        self.assertIsInstance(kwargs["extra_settings"], _FakeWasapiSettings)
+        self.assertFalse(kwargs["extra_settings"].exclusive)  # Shared mode forced!
+        # L/R swapped in memory: original L had energy, R was 0 -> swapped L is ~0, R has energy
+        self.assertLess(float(np.max(np.abs(arr[:, 0]))), 1e-4)
+        self.assertGreater(float(np.max(np.abs(arr[:, 1]))), 0.1)
+
+        # Safe degradation when no audio output device exists (never crashes)
+        bad_sd = _FakeSoundDevice(fail_no_device=True)
+        bad_statuses: List[str] = []
+        player_bad = PreviewPlayer(
+            lambda: None,
+            on_status=bad_statuses.append,
+            winsound_module=None,
+            sounddevice_module=bad_sd,
+        )
+        self.addCleanup(player_bad.shutdown)
+        self.assertTrue(player_bad.play(stereo_wav))
+        player_bad._last_thread.join(5)
+        self.assertEqual(bad_sd.played, [])
+        self.assertTrue(any("stereo_lr.wav" in s for s in bad_statuses))
+
+    def test_v040_win32_64bit_drag_drop_hook_pms_and_settings_language_label(self) -> None:
+        import ctypes
+        import sys
+        import tkinter as tk
+        from gui.i18n import TRANSLATIONS, get_language, set_language
+
+        # 1) Setting dialog language label must stay fixed as "🌐 Language:" in all 3 languages
+        orig_lang = get_language()
+        self.addCleanup(lambda: set_language(orig_lang))
+        for lang in ("zh_CN", "en", "ja"):
+            self.assertEqual(TRANSLATIONS[lang]["lang_label"], "🌐 Language:")
+
+        def _walk_labels(widget) -> List[str]:
+            out: List[str] = []
+            try:
+                txt = str(widget.cget("text"))
+                if txt:
+                    out.append(txt)
+            except Exception:
+                pass
+            for ch in widget.winfo_children():
+                out.extend(_walk_labels(ch))
+            return out
+
+        for lang in ("zh_CN", "en", "ja"):
+            set_language(lang)
+            self.app.apply_language()
+            self.root.update()
+            with mock.patch.object(tk.Toplevel, "grab_set", return_value=None):
+                self.app.open_settings_dialog()
+                self.root.update()
+                dialogs = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
+                self.assertTrue(dialogs)
+                dlg = dialogs[-1]
+                labels = _walk_labels(dlg)
+                self.assertIn("🌐 Language:", labels)
+                dlg.destroy()
+
+        # 2) Verify Win32 64-bit drag-drop hook attachment, argtypes/restype, teardown & .pms / invalid drop
+        if sys.platform == "win32":
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+            set_wndproc = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+            self.assertIsNotNone(self.app._dnd_hwnd)
+            self.assertIsNotNone(self.app._wndproc_ref)
+            self.assertIs(set_wndproc.restype, ctypes.c_void_p)
+            self.assertIs(user32.CallWindowProcW.restype, ctypes.c_ssize_t)
+            self.assertEqual(tuple(shell32.DragQueryFileW.argtypes)[0], ctypes.c_void_p)
+            self.assertEqual(tuple(shell32.DragFinish.argtypes), (ctypes.c_void_p,))
+
+            # Re-hook / teardown round-trip on real Tk window must not crash
+            self.app._teardown_windows_drag_drop()
+            self.assertIsNone(self.app._dnd_hwnd)
+            self.app._setup_windows_drag_drop()
+            self.assertIsNotNone(self.app._dnd_hwnd)
+
+        # Dropping unsupported file or directory shows warning without crashing
+        bad_txt = self.tmp / "notes.txt"
+        bad_txt.write_text("hi", encoding="utf-8")
+        with mock.patch.object(self.app_mod.messagebox, "showwarning") as warn_mock:
+            self.app._handle_dropped_files([str(bad_txt)])
+            warn_mock.assert_called_once()
+
+        # Dropping .pms loads cleanly without warning
+        pms_file = self.tmp / "chart_9k.pms"
+        pms_file.write_text("#TITLE PMS Drop\n#BPM 130\n#WAV01 kick.wav\n#00111:01\n", encoding="utf-8")
+        with mock.patch.object(self.app_mod.messagebox, "showwarning") as warn_mock:
+            self.app._handle_dropped_files([str(pms_file)])
+            for _ in range(200):
+                self.root.update()
+                if not self.app._busy and self.app.chart and self.app.chart.source_path == pms_file:
+                    break
+                threading.Event().wait(0.02)
+            warn_mock.assert_not_called()
+        self.assertEqual(self.app.chart.source_path, pms_file)
 
 
 if __name__ == "__main__":

@@ -45,6 +45,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 & $venvPy -c "import numpy, tkinter" 
 if ($LASTEXITCODE -ne 0) { throw "numpy and tkinter must be available to the build venv" }
+& $venvPy -c "import soundfile, sounddevice, soxr" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    & $venvPy -m pip install soundfile sounddevice soxr
+    if ($LASTEXITCODE -ne 0) { throw "pip install soundfile sounddevice soxr failed" }
+}
 
 & $venvPy -m PyInstaller --noconfirm --clean --distpath (Join-Path $root "dist") --workpath (Join-Path $root "build") (Join-Path $root "bms2dtx.spec")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
