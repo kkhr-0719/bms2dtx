@@ -7,7 +7,12 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .constants import TabId
+from .constants import (
+    AUTO_LP_CHIP_NONE,
+    AUTO_LP_THRESHOLD_NOTE,
+    DTX_MAX_WAV_SLOTS,
+    TabId,
+)
 
 
 @dataclass(frozen=True)
@@ -142,14 +147,26 @@ class BmsChart:
 
     @property
     def exceeds_dtx_wav_limit(self) -> bool:
-        """True if retaining all slices in Toggle=ON would exceed DTX 36-base limit (1295)."""
+        """True if retaining all slices in Toggle=ON would exceed DTX capacity (01..ZX = 1293)."""
         defined_or_used = set(self.wavs.keys()) | set(self.referenced_wav_ids)
-        return len(defined_or_used) > 1295
+        return len(defined_or_used) > DTX_MAX_WAV_SLOTS
 
     @property
     def toggle_off_locked(self) -> bool:
         """True when Toggle MUST be locked to OFF per AGENTS.md Rule 5."""
         return self.exceeds_dtx_wav_limit
+
+
+@dataclass
+class AutoLpConfig:
+    """Auto-LP (OHH 18 -> CHH 11 automatic LP 1B pedal insertion) configuration."""
+
+    chip_mode: str = AUTO_LP_CHIP_NONE  # "none" | "auto" | "empty_zz" | specific BMS WAV ID
+    volume: int = 50  # 0..100 for #VOLUMEZY
+    threshold_mode: str = AUTO_LP_THRESHOLD_NOTE  # "note_value" | "ms"
+    note_num: int = 1
+    note_den: int = 4  # 2, 4, 6, 8, 12, 16
+    threshold_ms: float = 250.0
 
 
 @dataclass
@@ -163,6 +180,7 @@ class MappingConfig:
     overflow_strategy: str = "fail"  # "fail" | "nudge_192" | "fallback_toggle_off"
     separate_lbd: bool = False  # False => sync BD default bind to lane 03 LBD sub-slot when LBD unbound
     default_bind_mode: str = "manual"  # "manual" | "auto"
+    auto_lp: AutoLpConfig = field(default_factory=AutoLpConfig)
 
 
 @dataclass
@@ -242,3 +260,5 @@ class ConversionResult:
     preimage_path: Optional[Path] = None
     background_path: Optional[Path] = None
     bga_copied_files: List[Path] = field(default_factory=list)
+    auto_lp_placed_count: int = 0
+    project_json_path: Optional[Path] = None

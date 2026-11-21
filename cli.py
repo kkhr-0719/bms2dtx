@@ -15,6 +15,7 @@ from core import (
     batch_convert,
     convert_bms,
     inspect_bms,
+    parse_auto_lp_config,
 )
 
 
@@ -56,6 +57,8 @@ def _load_mapping_json(path: Path) -> MappingConfig:
         slicer_bgm_columns=[int(x) for x in data.get("slicer_bgm_columns", [])],
         overflow_strategy=str(data.get("overflow_strategy", "fail")),
         separate_lbd=bool(data.get("separate_lbd", False)),
+        default_bind_mode=str(data.get("default_bind_mode", "manual")),
+        auto_lp=parse_auto_lp_config(data.get("auto_lp")),
     )
 
 

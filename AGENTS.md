@@ -1,80 +1,76 @@
 # Project: bms2dtx (`bms2dtx.exe`)
 
-## 1. 项目目标与交付物
-构建一个轻量级 Windows 桌面工具，将 BMS / BME 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并最终使用 PyInstaller 打包为单文件可执行程序 `bms2dtx.exe`（同时保留可运行的 Python 源码与单元测试）。
+## 1. 项目目标与版本约定
+- 构建一个轻量级 Windows 桌面工具，将 BMS / BME 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并支持通过 PyInstaller 打包为单文件无黑框可执行程序 `dist/bms2dtx.exe`（同时保留可运行的 Python CLI、源码与单元测试）。
+- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.3.0`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
+
+---
 
 ## 2. 铁律与绝对约束
-1. **原始文件只读**：严禁修改、重命名或覆盖用户输入的原始 `.bms` / `.bme` 文件及 BMS 母文件夹中的任何现有文件。所有修改、转码或混音输出均仅作用于内存或写入指定的输出目录。
+1. **原始文件 100% 只读**：严禁修改、重命名或覆盖用户输入的原始 `.bms` / `.bme` 文件及 BMS 母文件夹中的任何现有文件。所有后缀修正、转码、音频混音、图片缩放、静音补位与 `__bms2dtx.json` 均仅作用于内存或写入指定的输出目录（输出目录绝不能与源谱目录或音频子目录相同）。
 2. **编码规则**：
-   - 读取 BMS / BME 时，优先使用 `cp932`（Windows Shift-JIS 超集）解码，失败再回退 `utf-8-sig`，最后兜底 `cp932` + `errors="replace"`。
-   - 导出 `.dtx` 默认使用 `cp932` 编码以兼容传统 DTXCreator / DTXMania；提供 `--utf8` 参数或界面勾选框以输出 UTF-8。
-3. **母文件夹音频后缀校验与自动修正**：
-   - 解析 `#WAVxx` 时，检查对应音频文件在 BMS 母文件夹中是否存在。
-   - 若谱面引用后缀（如 `.wav`）不存在，但同 stem 下存在其他常见音频后缀（如 `.ogg`、`.mp3`、`.xa`、`.flac`，大小写不敏感），则在**内存中**自动将该 `#WAVxx` 的文件名修正为磁盘上真实存在的后缀。
-   - 若勾选“将保留的 `.wav` 切片自动转码为 `.ogg`”，则在输出目录生成 `.ogg` 并将导出 `.dtx` 中对应 `#WAVxx` 后缀更新为 `.ogg`（不修改原文件）。
+   - 读取 BMS / BME 时，优先使用 `cp932`（Windows Shift-JIS 超集）严格解码，失败再回退 `utf-8-sig`，最后兜底 `cp932` + `errors="replace"`。
+   - 导出 `.dtx` 默认使用 `cp932` 以兼容传统 DTXCreator / DTXMania；提供 `--utf8` 参数或界面勾选框输出 UTF-8。
+3. **母文件夹媒体后缀校验与自动修正**：
+   - 解析 `#WAVxx`、`#PREVIEW`、`#STAGEFILE`、`#BACKBMP`、`#BMPxx`/`#AVIxx` 时，检查对应文件在 BMS 母文件夹中是否存在（不区分大小写）。
+   - 若引用后缀不存在但同 stem 下存在其他受支持后缀，则在**内存中**自动修正为磁盘上真实存在的后缀。
+   - 缺失音频（`exists=False` / `resolved_path is None`）**严禁**参与物理文件去重合并，必须各自按原 `#WAVxx` ID 独立保留。
 4. **BGM 列号与 iBMSC / μBMSC 严格对齐**：
    - 解析每小节的 `01`（BGM）通道行时，**绝对不要在解析阶段丢弃 `:00` 占位行**。同一小节内按出现顺序第 1、2、3... 条 `01` 行分别对应 `B1`、`B2`、`B3`...
-   - 统计全曲所有轨道（原 `01` 各列、游玩区 `11`–`29`、长条区 `51`–`69` 等）时，**自动剔除全曲全程为空的轨道**。
-5. **进制检测（36 进制 vs `#BASE 62`）**：
-   - 检测谱面是否声明 `#BASE 62` 或包含区分大小写的 62 进制音符索引。
-   - 当检测到 62 进制时，提示用户超出 DTX 原生 36 进制（`01`–`ZZ`，最多 1295 个有效切片）上限；若保留切片总数超限，则**强制锁定 Toggle = OFF（离线混音成 `bgm.ogg`）**，仅保留用户选入 15 个 Tab 的切片（若选入切片不超过 1294 个，自动重编号为合法的 36 进制 `02`–`ZZ`，`01` 留给 `bgm.ogg`）。
-6. **禁止写入越界通道与禁止往 `01` 轨硬塞多行叠加**：
-   - 绝不允许写入不存在的 `SE33` 及以上通道。
-   - 绝不允许将多条独立音轨硬塞进同一小节的 `01`（BGM）轨做多行叠加。
-   - 遇到 DTX 不支持的 `#STOP` / `09` 通道或未展开的 `#RANDOM` / `#IF` 条件分支时，记录清晰警告并提示用户。
+   - 统计全曲所有轨道时，**自动剔除全曲全程为空的轨道**。
+5. **进制检测（Base-36 vs `#BASE 62`）与 `ZY` / `ZZ` 槽位永久保留**：
+   - 常规导出槽位永久保留 **`ZY`**（`Auto-LP` 实音/映射音频槽）与 **`ZZ`**（`Auto-LP` 空音占位槽 `_silent_zz.wav`），常规可用切片上限为 **`1293`**（`01`..`ZX`；Toggle = OFF 模式下 `01` 留给 `bgm.ogg`，用户最多映射 **`1292`** 个去重切片 `02`..`ZX`）。
+   - 即使原 BMS 谱面声明了 `#WAVZY` 或 `#WAVZZ`，导出重排也一律将其重映射至 `01`..`ZX` 区间内的其他空槽位，杜绝与 `Auto-LP` 冲突。
+   - 检测到 `#BASE 62`、隐式大小写索引碰撞或切片总数 `> 1293` 时，提示用户并**强制锁定 Toggle = OFF**（UI 当前也固定仅开放 Toggle = OFF 主流程，继续隐藏 `Toggle = ON` 入口）。
+6. **通道合法性与边界约束**：
+   - 绝不允许写入不存在的 `SE33`（`93`）及以上通道，绝不允许将多条独立音轨硬塞进同一小节的 `01`（BGM）轨做多行叠加。
+   - 遇到 `#STOP` / `09` 通道或未展开的 `#RANDOM` / `#IF` / `#SWITCH` 条件分支时，记录清晰警告。
+   - 当 `separate_lbd=False`（默认隐藏 LBD Tab）时，若配置中仍残留 `LBD` 分配或绑定，导出时确定性地将其合并入 `BD`，绝不在 `1C` 轨生成幽灵音符。
+7. **Windows 进程与 `ffmpeg` 查找底线**：
+   - `find_ffmpeg` 在 `sys.frozen` 及开发环境下均优先查找 `Path(sys.executable).resolve().parent` 及 `bin/` 子目录，再回退系统 `PATH` 与设置弹窗手动指定。
+   - Windows 下所有调用 `ffmpeg` / `ffprobe` 的 `subprocess` 必须传入 `CREATE_NO_WINDOW`，防止打包后出现黑框闪屏。
 
-## 3. BMS 与 DTX 通道及轨位对照速查
-- **DTX 左侧鼓轨（演奏区）**：
-  - `11`: Hi-Hat Close (HH)
-  - `12`: Snare Drum (SD)
-  - `13`: Bass Drum (BD)
-  - `14`: High Tom (HT)
-  - `15`: Low Tom (LT)
-  - `16`: Right Cymbal (CY)
-  - `17`: Floor Tom (FT)
-  - `18`: Hi-Hat Open (HHO)
-  - `19`: Ride Cymbal (RD)
-  - `1A`: Left Cymbal (LC)
-  - `1B`: Left Pedal (LP)
-  - `1C`: Left Bass Drum (LBD)
-- **DTX BGM 轨**：`01`（配合头部 `#BGMWAV: xx`）。
-- **DTX SE 轨（32 条，通道号十六进制 `61`–`69`, `70`–`79`, `80`–`89`, `90`–`92`）**：
-  - `SE1`–`SE5`（`61`–`65`）：传统打断前音通道，用于 Toggle ON 二级界面中最多 5 列原样搬运的 BGM 列（**不参与 Collapse**）。
-  - `SE6`（`66`）：固定分配给主界面 Tab 13（`Other` / FX）。
-  - `SE11`–`SE12`（`71`–`72`）：优先分配给主界面 Tab 14（`Guitar`），**不参与 Collapse**；若 Tab 14 留空则自动释放回非打断 Collapse 池。
-  - `SE13`–`SE14`（`73`–`74`）：优先分配给主界面 Tab 15（`Bass`），**不参与 Collapse**；若 Tab 15 留空则自动释放回非打断 Collapse 池。
-  - 非打断 Collapse 公共池优先级：优先使用已确认非打断轨 `SE7`–`SE10`、`SE15`–`SE23`、`SE30`–`SE32`（跳过已被 Guitar/Bass 占用的 `SE11`–`SE14`）；仅当上述轨道全部用尽时，再启用 `SE24`–`SE29`（`84`–`89`）作为末尾备用区。
-- **DTXCreator 编辑器绑定芯片指令**：
-  - `#DTXC_LANEBINDEDCHIP: <lane> <main_wav> <sub_wav>`
-  - 其中 `<lane>` 为 DTXCreator 界面列号：`01`=LC、`02`=HH（主=HH Close `11`，副=HH Open `18`）、`03`=LP/LBD（主=LP `1B`，副=LBD `1C`）、`04`=SD、`05`=HT、`06`=BD、`07`=LT、`08`=FT、`09`=CY/RD（主=CY `16`，副=RD `19`）。未指定时补 `00`。
+---
 
-## 4. 交互与工作流设计
-1. **导入与体检**：选择或拖入 `.bms` / `.bme`，自动完成编码解码、母文件夹后缀内存修正、进制检测、B1–Bn 列对齐及空轨剔除，并展示摘要。
-2. **主窗口 — 15 个 Tab 双列表（Shuttle）映射**：
-   - Tab 1–12：`LC`, `HH Close`, `HH Open`, `LP`, `LBD`, `SD`, `HT`, `BD`, `LT`, `FT`, `CY`, `RD`。每个鼓轨 Tab 右侧列表上方提供“默认绑定 WAV”下拉框，用于生成 `#DTXC_LANEBINDEDCHIP`。
-   - Tab 13：`Other`（固定归 `SE6`，无默认绑定下拉框）。
-   - Tab 14：`Guitar`（可选，顶部注明“留空即禁用并自动释放 `SE11`–`SE12`”）。
-   - Tab 15：`Bass`（可选，顶部注明“留空即禁用并自动释放 `SE13`–`SE14`”）。
-   - **列表交互**：左侧源 `#WAV` 列表必须显式启用扩展多选（支持 Shift 区间多选与 Ctrl 点选）；已被选入任一 Tab 的项目在左侧置灰提示；支持**单个切片试听**（仅播放单个音频文件，不做整轨/多音时间轴混音试听）；中间提供“绿色右箭头（加入）”与“红色叉叉（移除）”。
-3. **剩余 Key 音分流开关（Toggle）**：
-   - 凡进入 Tab 1–15 的 Key 音，即使在 Toggle = OFF 下也保留为独立切片，不混入 `bgm.ogg`。
-   - **Toggle = OFF（或 62 进制超限强制锁定）**：将所有未选入 Tab 1–15 的剩余音符按精确时间轴（含 BPM 变化与拍号 `02`）离线混音导出为 `bgm.ogg`，写入 `#WAV01: bgm.ogg` 与 `#BGMWAV: 01` 并挂入 `01` 轨。
-   - **Toggle = ON**：
-     - 提供**可选的二级 BGM 列选择步骤**（可一键跳过）：列出非空 `B1`–`Bn` 列及音符数/示例切片名，允许勾选最多 **5 列**原样 1 对 1 搬运至 `SE1`–`SE5`（不 Collapse）。
-     - 其余未选切片进入非打断 Collapse 公共池（最小干扰装箱：同精确时间点不撞车，优先选择距离上一音符时间间隔最久的可用通道）。
-     - **极端溢出兜底（Collapse 后仍有音符无法放入 `SE1`–`SE32`）**：弹窗提供三选一：① 放弃 / 切回 Toggle OFF 渲染 `bgm.ogg`；② 尝试按 `±1/192` 小节微偏移强行塞入（提示仅作保底且可能受 DTXCreator 192 格量化影响）；③ 返回调整。
-4. **WAV 编号重排**：
-   - 导出前将所有保留切片按顺序重新连续编号（`01` 留给 Toggle OFF 的 `bgm.ogg`，随后按 `LC -> HH Close -> HH Open -> LP -> LBD -> SD -> HT -> BD -> LT -> FT -> CY -> RD -> Other -> Guitar -> Bass -> SE1..SE5 -> 其余切片` 排序）。
+## 3. BMS / DTX 通道与 `Auto-LP` 规范速查
+- **DTX 左侧鼓轨**：
+  - `11` HH Close (CHH) | `12` SD | `13` BD | `14` HT | `15` LT | `16` CY | `17` FT | `18` HH Open (OHH) | `19` RD | `1A` LC | `1B` LP | `1C` LBD
+- **DTX BGM / SE 轨**：
+  - `01` BGM（配合 `#BGMWAV: 01`）；`SE1`–`SE32`（`61`–`92`）：`SE6`（`66`）固定归 `Other`，`SE11`–`SE12`（`71`–`72`）优先归 `Guitar`，`SE13`–`SE14`（`73`–`74`）优先归 `Bass`，留空即释放回 Collapse 池。
+- **DTXC 绑定芯片**：
+  - `#DTXC_LANEBINDEDCHIP: <lane> <main_wav> <sub_wav>`（`01`=LC、`02`=HHC/HHO、`03`=LP/LBD、`04`=SD、`05`=HT、`06`=BD、`07`=LT、`08`=FT、`09`=CY/RD）。`separate_lbd=False` 且 `LBD` 未独立绑定时，`BD` 默认芯片自动同步填入 `03` 轨副槽。
+- **`Auto-LP`（OHH `18` → CHH `11` 自动补足 LP `1B` 状态机）**：
+  - 配置字段：`chip_mode`（`none` / `auto` / `empty_zz` / 指定 LP 切片）、`volume`（`0..100`，默认 `50`）、`threshold_mode`（`note_value` 默认 / `ms`）、`note_num`/`note_den`（默认 `1/4`，分母可选 `2, 4, 6, 8, 12, 16`）、`threshold_ms`（默认 `250`）。
+  - 选音回退链（`chip_mode == "auto"`）：优先取 `LP` Tab 默认绑定芯片；若为“无”则回退 `LP` Tab 谱面使用次数最多切片；若 `LP` Tab 为空则安全退化为不插入。
+  - 槽位与音量输出：选真实 LP 音频时写入 `#WAVZY: <路径>\t;<LP Label>` + `#VOLUMEZY: <0~100>`，以 `ZY` 写入 `1B`；选 `empty_zz` 时生成 `_silent_zz.wav`（10ms 16-bit mono PCM 静音），写入 `#WAVZZ: _silent_zz.wav\t;LP_GHOST` + `#VOLUMEZZ: 0`，以 `ZZ` 写入 `1B`。
+  - 3 条物理防误插规则（阈值判定均含等号 `<=`）：
+    1. 仅在 `OHH` 之后的**第一个** `CHH` 处触发，后续连续 `CHH` 不重复插入；
+    2. 若 `OHH` 与该 `CHH` 之间或该 `CHH` 同一拍位**已存在原谱 LP 音符**，跳过不插入、绝不覆盖原谱；
+    3. 连续多个 `OHH`（`OHH₁ → OHH₂ → CHH`）时，以最近的 `OHH₂` 作为间距计算起点。
 
-## 5. 测试与打包要求
-- 编写 `tests/` 单元测试，覆盖：CP932/UTF-8 编码、母文件夹后缀内存修正、B1–Bn 占位行对齐与空轨剔除、`#BASE 62` 检测与强制 Toggle OFF、15-Tab 映射与 `#DTXC_LANEBINDEDCHIP` 生成、Slicer 最多 5 列免 Collapse、Collapse 最小干扰装箱、`±1/192` 溢出兜底以及 `#WAVxx` 重排。
-- 提供一键打包脚本或命令，生成 `dist/bms2dtx.exe`。
+---
 
-## 6. Multi-Agent 协同与领航员同步协议（AgentLimb）
-1. **困惑即问**：遇到格式边界、需求歧义或方案冲突时，通过 AgentLimb MCP 向当前打开的网页端领航员（Gemini）提问并严格执行裁决。
-2. **阶段完工强制汇报（Stage Gate）**：每完成一个 Phase（如 Phase 1 核心收口、Phase 2 批测完成、Phase 3 GUI 完工），在**交棒给下一位 Agent 之前**，必须主动通过 AgentLimb 向网页端领航员发送一份**精简完工报告**，仅包含：
-   - 本阶段新增/修改的核心模块清单（只列文件名与职责，**严禁粘贴源码全文或冗长日志**）；
-   - 测试与验收结果（通过项数、真谱校验情况）；
-   - 与原规范存在偏差、妥协或尚未解决的风险点；
-   - 准备交给下一阶段 Agent 的交棒摘要。
-3. **获准后再交棒**：发送完工报告后，须读取领航员的验收回复，确认无补充改动后再启动下一阶段开发。
+## 4. 桌面 GUI 与导出能力要点
+- **主流程与界面**：支持点击与 Win32 `WM_DROPFILES`（`DragQueryFileW` 完整 Unicode 路径）拖入导入；左侧 4 列 `ttk.Treeview`（`ID` / `文件名` / `次数` / `目标轨`，扩展多选置灰 + 2 行底部控制栏 + 悬停 Tooltip + 左右列表联动单音试听）；`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` 撤销重做栈（输入控件聚焦时不抢占）与未导出 `dirty` 关闭拦截。
+- **LP Tab 双行扩展**：仅在 `LP` Tab 顶部显示默认绑定 + 阈值模式单选（第 1 行）与 `LP 补足` 下拉 / 音量微调框 / 阈值输入框（第 2 行），并为 `LP 补足` 控件挂载 **1000ms** 延迟悬停 Tooltip。
+- **格式与媒体增强**：
+  - 原生 `#GENRE:`（`;` 转全角 `；`）、固定 `#COMMENT: via bms2dtx`、`#WAVxx` 行尾 `\t;<LABEL>` 注释（支持自定义与清洗）；
+  - 2 级 `#PREVIEW`（先头部显式定义，未定义则扫描母目录未入谱 `preview*` 音频）；
+  - `Swap L/R` 全局左右声道互换（试听、`bgm.ogg`、`#PREVIEW` 及保留切片；单声道切片原样复制）；
+  - `#STAGEFILE` / `#PREIMAGE` / `#BACKGROUND` 三档图片处理（原图直拷 / `204x269`+`640x480` 等比缩放补黑边 / 不搬运）与实验性 BGA 透传（视频转 `#AVIxx` + `54` 轨，图片保持 `#BMPxx` + `04`/`07` 轨）；
+  - 三语（`zh_CN` / `en` / `ja`）热切换与 `%APPDATA%\bms2dtx\settings.json` 持久化。
+- **导出自动存档**：每次成功导出自动在输出目录根目录写入完整工程映射 **`__bms2dtx.json`**；界面按钮「另存为 JSON...」保留手动另存，「载入映射 JSON...」默认定位至输出目录。
+
+---
+
+## 5. Git 分支、测试脱敏与协同规则
+1. **Git 分支与安全规范**：
+   - 新功能或重构**必须**在独立特性分支 `feat/*` 上开发；仅当全量单元测试（`-W error`）与 PyInstaller 打包及冒烟测试全部通过后，再切回 `main` 合并并清理分支。
+   - **严禁执行 `git push --force`**、严禁重写已有历史提交、严禁修改 `git config --global`（仓库身份配置一律使用 `--local`）。
+2. **测试与脱敏规范**：
+   - **严禁**在 `tests/` 或仓库源码中硬编码任何私人曲包名称或个人本地绝对路径。
+   - 可选的真实谱面批量回归测试通过环境变量 `BMS2DTX_REAL_CHARTS_DIR` 动态读取（`tests/test_real_charts_batch.py`），未设置该环境变量时自动 `skip`。
+   - `.gitignore` 必须过滤构建产物、媒体/谱面文件以及本地测试曲包目录，避免版权素材误入版本库。
+3. **AgentLimb / 浏览器 MCP 协同熔断规则**：
+   - **仅当**用户提示词明确要求联系网页端领航员时，才可启用浏览器 / AgentLimb MCP；无人值守或离线任务严禁擅自调用。
+   - 启用期间，单次浏览器 / AgentLimb MCP 调用若发生超时或报错，**最多重试 1 次**；若仍失败，立即停止调用并降级为本地直接收尾汇报后停机，严禁在满载上下文下循环重试消耗额度。

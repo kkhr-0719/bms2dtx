@@ -1001,6 +1001,150 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertNotIn("#PREIMAGE:", dtx_none)
             self.assertNotIn("#BACKGROUND:", dtx_none)
 
+    def test_auto_lp_pipeline_wavzy_volumezy_silent_zz_and_project_json(self) -> None:
+        import json
+        import wave
+        from cli import _load_mapping_json
+        from core.constants import (
+            AUTO_LP_CHIP_AUTO,
+            AUTO_LP_CHIP_EMPTY_ZZ,
+            AUTO_LP_SILENT_FILENAME,
+            PROJECT_MAPPING_FILENAME,
+        )
+        from core.models import AutoLpConfig
+        from gui.helpers import AssignmentModel
+
+        def _write_tone_wav(path: Path, freq_hz: float = 440.0, duration_s: float = 0.05) -> None:
+            import math
+            import struct
+
+            sr = 44100
+            nframes = int(sr * duration_s)
+            with wave.open(str(path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                frames = bytearray()
+                for i in range(nframes):
+                    val = int(8000 * math.sin(2 * math.pi * freq_hz * i / sr))
+                    frames.extend(struct.pack("<h", val))
+                wf.writeframes(bytes(frames))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            _write_tone_wav(src / "hhc.wav", 660.0)
+            _write_tone_wav(src / "hho.wav", 880.0)
+            _write_tone_wav(src / "lp.wav", 330.0)
+            _write_tone_wav(src / "bgm.wav", 220.0)
+
+            bms = src / "auto_lp_test.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE AutoLpPipeline",
+                        "#BPM 120",
+                        "#WAV01 hhc.wav",
+                        "#WAV02 hho.wav",
+                        "#WAV03 lp.wav",
+                        "#WAV04 bgm.wav",
+                        "#00101:04000000",
+                        "#00118:02000000",
+                        "#00111:00010000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            # 1) chip_mode="auto", volume=75, transcode_wav_to_ogg=False -> #WAVZY: lp.wav\t;LP + #VOLUMEZY: 75 + __bms2dtx.json
+            out_auto = root / "out_auto"
+            cfg_auto = MappingConfig(
+                tab_wavs={
+                    TabId.HH_CLOSE: ["01"],
+                    TabId.HH_OPEN: ["02"],
+                    TabId.LP: ["03"],
+                },
+                default_lane_binds={TabId.LP: "03"},
+                auto_lp=AutoLpConfig(
+                    chip_mode=AUTO_LP_CHIP_AUTO,
+                    volume=75,
+                    threshold_mode="note_value",
+                    note_num=1,
+                    note_den=4,
+                ),
+            )
+            res_auto = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_auto, transcode_wav_to_ogg=False, render_bgm=False),
+                mapping=cfg_auto,
+            )
+            self.assertEqual(res_auto.auto_lp_placed_count, 1)
+            self.assertIsNotNone(res_auto.project_json_path)
+            self.assertEqual(res_auto.project_json_path.name, PROJECT_MAPPING_FILENAME)
+            self.assertTrue(res_auto.project_json_path.is_file())
+
+            dtx_auto = res_auto.dtx_path.read_text(encoding="cp932")
+            self.assertIn("#WAVZY: lp.wav\t;LP", dtx_auto)
+            self.assertIn("#VOLUMEZY: 75", dtx_auto)
+            self.assertIn("#0011B: 00ZY0000", dtx_auto)
+
+            # Verify __bms2dtx.json round-trips cleanly via CLI loader & GUI AssignmentModel.
+            proj_data = json.loads(res_auto.project_json_path.read_text(encoding="utf-8"))
+            self.assertEqual(proj_data["auto_lp"]["chip_mode"], AUTO_LP_CHIP_AUTO)
+            self.assertEqual(proj_data["auto_lp"]["volume"], 75)
+            cli_cfg = _load_mapping_json(res_auto.project_json_path)
+            self.assertEqual(cli_cfg.auto_lp, cfg_auto.auto_lp)
+
+            chart_parsed = parse_bms(bms)
+            model = AssignmentModel(chart_parsed)
+            model.load_json_dict(proj_data, chart_parsed)
+            self.assertEqual(model.auto_lp, cfg_auto.auto_lp)
+
+            # Verify swap_lr + custom default_bind_mode survive AssignmentModel JSON round-trip too.
+            model.swap_lr = True
+            saved_with_swap = model.to_json_dict()
+            self.assertTrue(saved_with_swap["swap_lr"])
+            model2 = AssignmentModel(chart_parsed)
+            model2.load_json_dict(saved_with_swap, chart_parsed)
+            self.assertTrue(model2.swap_lr)
+
+            # 2) chip_mode="empty_zz" -> _silent_zz.wav (~10ms 16-bit mono PCM), #WAVZZ + #VOLUMEZZ: 0 + 1B ZZ
+            out_zz = root / "out_zz"
+            cfg_zz = MappingConfig(
+                tab_wavs={
+                    TabId.HH_CLOSE: ["01"],
+                    TabId.HH_OPEN: ["02"],
+                },
+                auto_lp=AutoLpConfig(
+                    chip_mode=AUTO_LP_CHIP_EMPTY_ZZ,
+                    volume=50,
+                    threshold_mode="ms",
+                    threshold_ms=500.0,
+                ),
+            )
+            res_zz = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_zz, transcode_wav_to_ogg=False, render_bgm=False),
+                mapping=cfg_zz,
+            )
+            self.assertEqual(res_zz.auto_lp_placed_count, 1)
+            silent_path = out_zz / AUTO_LP_SILENT_FILENAME
+            self.assertTrue(silent_path.is_file())
+            with wave.open(str(silent_path), "rb") as wf:
+                self.assertEqual(wf.getnchannels(), 1)
+                self.assertEqual(wf.getsampwidth(), 2)
+                nframes = wf.getnframes()
+                self.assertGreater(nframes, 0)
+                self.assertLessEqual(abs(nframes / wf.getframerate() - 0.01), 0.005)
+                self.assertEqual(wf.readframes(nframes), b"\x00\x00" * nframes)
+
+            dtx_zz = res_zz.dtx_path.read_text(encoding="cp932")
+            self.assertIn(f"#WAVZZ: {AUTO_LP_SILENT_FILENAME}\t;LP_GHOST", dtx_zz)
+            self.assertIn("#VOLUMEZZ: 0", dtx_zz)
+            self.assertIn("#0011B: 00ZZ0000", dtx_zz)
+            self.assertTrue((out_zz / PROJECT_MAPPING_FILENAME).is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

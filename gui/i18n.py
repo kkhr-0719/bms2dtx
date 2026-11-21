@@ -51,7 +51,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "health_warnings": "警告",
         "health_warnings_value": "{count} 条",
         "radix_warn_base62": "  ⚠ 检测到 62 进制，超出 DTX 原生 36 进制上限",
-        "radix_warn_limit": "  ⚠ 切片总数 > 1295（v1 固定 Toggle = OFF 离线混音 bgm.ogg）",
+        "radix_warn_limit": "  ⚠ 切片总数 > 1293（v0.3 固定 Toggle = OFF 离线混音 bgm.ogg）",
         "left_frame_title": "源 #WAV 列表（Shift/Ctrl 多选；单击 / 方向键 / 空格 试听）",
         "col_id": "ID",
         "col_filename": "文件名",
@@ -75,13 +75,25 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "right_frame_title": "15 Tab 映射（Tab 1–12 鼓 / 13 Other / 14 Guitar / 15 Bass）",
         "separate_lbd_chk": "单独定义 LBD",
         "default_bind_label": "默认绑定 WAV (#DTXC_LANEBINDEDCHIP):",
+        "lp_default_bind_short": "默认绑定:",
+        "auto_lp_label": "LP 补足:",
+        "auto_lp_chip_none": "无",
+        "auto_lp_chip_auto": "自动",
+        "auto_lp_chip_empty_zz": "ZZ: 空音",
+        "auto_lp_vol_label": "音量:",
+        "auto_lp_mode_note": "音符时值",
+        "auto_lp_mode_ms": "ms",
+        "auto_lp_tooltip": (
+            "当开镲 (OHH, 18) 转为闭镲 (CHH, 11) 且间距 <= 设定阈值，且期间与闭镲同拍位均无原谱 LP 时，"
+            "自动在闭镲位同步补入左脚踩镲 (LP, 1B) 音符（使用永久保留槽位 ZY 或静音占位 ZZ）。"
+        ),
         "no_bind_label": "(未指定 / 00)",
         "auto_bind_prefix": "[自动最高频] ",
         "status_bind_auto_label": "自动最高频",
         "tab_note_other": "固定分配至 SE6 (通道 66)",
         "tab_note_guitar": "可选：留空即禁用并自动释放 SE11–SE12",
         "tab_note_bass": "可选：留空即禁用并自动释放 SE13–SE14",
-        "save_map_btn": "保存映射 JSON...",
+        "save_map_btn": "另存为 JSON...",
         "load_map_btn": "载入映射 JSON...",
         "export_frame_title": "导出",
         "output_dir_label": "输出目录:",
@@ -150,8 +162,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_drop_invalid_body": "请拖入 .bms / .bme / .bml 谱面文件:\n{name}",
         "dialog_radix_title": "进制提示",
         "dialog_radix_body": (
-            "检测到 Base-62 谱面或切片总数超过 DTX 36 进制上限 (1295)。\n\n"
-            "v1 GUI 固定使用 Toggle = OFF：只有你选入 15 个 Tab 的切片会保留为独立切片，\n"
+            "检测到 Base-62 谱面或切片总数超过 DTX 36 进制可用上限 (1293，其中 ZY/ZZ 保留给 Auto-LP)。\n\n"
+            "GUI 固定使用 Toggle = OFF：只有你选入 15 个 Tab 的切片会保留为独立切片，\n"
             "其余音符将离线混音为 bgm.ogg。"
         ),
         "dialog_clear_title": "清空分配",
@@ -191,6 +203,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "result_bgm_none": "bgm.ogg: 未生成",
         "result_preview_line": "#PREVIEW: {path}",
         "result_placed_notes": "已放置音符: {count}",
+        "result_auto_lp_line": "Auto-LP 自动补足: {count} 个音符",
+        "result_project_json_line": "自动存档映射 JSON: {path}",
         "result_copied_transcoded": "复制切片: {copied}   转码 .ogg: {transcoded}",
         "result_lane_binds": "#DTXC_LANEBINDEDCHIP 行数: {count}",
         "result_toggle_off_forced": "注意: 已强制 Toggle = OFF",
@@ -238,7 +252,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "health_warnings": "Warnings",
         "health_warnings_value": "{count} item(s)",
         "radix_warn_base62": "  ⚠ Base-62 detected, exceeds native DTX Base-36 limit",
-        "radix_warn_limit": "  ⚠ Total slices > 1295 (Toggle = OFF offline bgm.ogg mix locked)",
+        "radix_warn_limit": "  ⚠ Total slices > 1293 (Toggle = OFF offline bgm.ogg mix locked)",
         "left_frame_title": "Source #WAV List (Shift/Ctrl multi-select; Click / Arrows / Space to preview)",
         "col_id": "ID",
         "col_filename": "Filename",
@@ -262,13 +276,26 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "right_frame_title": "15-Tab Mapping (Tabs 1–12 Drums / 13 Other / 14 Guitar / 15 Bass)",
         "separate_lbd_chk": "Separate LBD",
         "default_bind_label": "Default Bound WAV (#DTXC_LANEBINDEDCHIP):",
+        "lp_default_bind_short": "Default:",
+        "auto_lp_label": "Auto-LP:",
+        "auto_lp_chip_none": "None",
+        "auto_lp_chip_auto": "Auto",
+        "auto_lp_chip_empty_zz": "ZZ: Silent",
+        "auto_lp_vol_label": "Vol:",
+        "auto_lp_mode_note": "Note Value",
+        "auto_lp_mode_ms": "ms",
+        "auto_lp_tooltip": (
+            "Automatically inserts a left-pedal (LP, 1B) note on the first Closed Hi-Hat (CHH, 11) "
+            "after an Open Hi-Hat (OHH, 18) when within the threshold and no original LP exists "
+            "between them or on that beat (uses reserved slot ZY or silent placeholder ZZ)."
+        ),
         "no_bind_label": "(None / 00)",
         "auto_bind_prefix": "[Auto Most-Used] ",
         "status_bind_auto_label": "Auto (most-used)",
         "tab_note_other": "Fixed to SE6 (Channel 66)",
         "tab_note_guitar": "Optional: leave empty to disable and release SE11–SE12",
         "tab_note_bass": "Optional: leave empty to disable and release SE13–SE14",
-        "save_map_btn": "Save Mapping JSON...",
+        "save_map_btn": "Save JSON As...",
         "load_map_btn": "Load Mapping JSON...",
         "export_frame_title": "Export",
         "output_dir_label": "Output Dir:",
@@ -337,8 +364,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_drop_invalid_body": "Please drop a .bms / .bme / .bml chart file:\n{name}",
         "dialog_radix_title": "Radix Notice",
         "dialog_radix_body": (
-            "Detected a Base-62 chart or total slices exceeding the DTX Base-36 limit (1295).\n\n"
-            "v1 GUI uses Toggle = OFF: only slices mapped into the 15 Tabs are kept as individual files; "
+            "Detected a Base-62 chart or total slices exceeding the usable DTX Base-36 limit (1293; ZY/ZZ reserved for Auto-LP).\n\n"
+            "GUI uses Toggle = OFF: only slices mapped into the 15 Tabs are kept as individual files; "
             "remaining notes are offline-mixed into bgm.ogg."
         ),
         "dialog_clear_title": "Clear All",
@@ -378,6 +405,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "result_bgm_none": "bgm.ogg: Not generated",
         "result_preview_line": "#PREVIEW: {path}",
         "result_placed_notes": "Placed notes: {count}",
+        "result_auto_lp_line": "Auto-LP inserted: {count} note(s)",
+        "result_project_json_line": "Project mapping JSON: {path}",
         "result_copied_transcoded": "Copied slices: {copied}   Transcoded .ogg: {transcoded}",
         "result_lane_binds": "#DTXC_LANEBINDEDCHIP lines: {count}",
         "result_toggle_off_forced": "Note: Toggle = OFF was forced",
@@ -425,7 +454,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "health_warnings": "警告",
         "health_warnings_value": "{count} 件",
         "radix_warn_base62": "  ⚠ 62進数を検出（DTX標準の36進数上限を超過）",
-        "radix_warn_limit": "  ⚠ スライス総数 > 1295（Toggle = OFF で bgm.ogg にオフラインミックス）",
+        "radix_warn_limit": "  ⚠ スライス総数 > 1293（Toggle = OFF で bgm.ogg にオフラインミックス）",
         "left_frame_title": "元 #WAV リスト（Shift/Ctrl 複数選択；クリック / 矢印 / Space で試聴）",
         "col_id": "ID",
         "col_filename": "ファイル名",
@@ -449,13 +478,26 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "right_frame_title": "15 Tab マッピング（Tab 1–12 ドラム / 13 Other / 14 Guitar / 15 Bass）",
         "separate_lbd_chk": "LBD を個別定義",
         "default_bind_label": "デフォルトバインド WAV (#DTXC_LANEBINDEDCHIP):",
+        "lp_default_bind_short": "既定:",
+        "auto_lp_label": "LP 補足:",
+        "auto_lp_chip_none": "なし",
+        "auto_lp_chip_auto": "自動",
+        "auto_lp_chip_empty_zz": "ZZ: 無音",
+        "auto_lp_vol_label": "音量:",
+        "auto_lp_mode_note": "音符長",
+        "auto_lp_mode_ms": "ms",
+        "auto_lp_tooltip": (
+            "オープン (OHH, 18) から設定しきい値以内で最初のクローズ (CHH, 11) に移行し、"
+            "その間および同時拍に元譜の LP がない場合、閉じた位置へ自動で LP (1B) ノーツを補完します"
+            "（予約スロット ZY または無音 ZZ を使用）。"
+        ),
         "no_bind_label": "(未指定 / 00)",
         "auto_bind_prefix": "[自動最多頻度] ",
         "status_bind_auto_label": "自動最多頻度",
         "tab_note_other": "SE6 (チャンネル 66) に固定割当",
         "tab_note_guitar": "任意：空欄で無効化（SE11–SE12 を自動解放）",
         "tab_note_bass": "任意：空欄で無効化（SE13–SE14 を自動解放）",
-        "save_map_btn": "マッピング JSON を保存...",
+        "save_map_btn": "JSONに別名保存...",
         "load_map_btn": "マッピング JSON を読込...",
         "export_frame_title": "エクスポート",
         "output_dir_label": "出力先フォルダ:",
@@ -524,8 +566,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_drop_invalid_body": ".bms / .bme / .bml 譜面ファイルをドロップしてください:\n{name}",
         "dialog_radix_title": "基数に関する通知",
         "dialog_radix_body": (
-            "Base-62 譜面、またはスライス総数が DTX 36進数上限 (1295) を超えています。\n\n"
-            "v1 GUI は Toggle = OFF 固定です：15 個の Tab に割り当てたスライスのみ個別ファイルとして保持され、"
+            "Base-62 譜面、またはスライス総数が利用可能な DTX 36進数上限 (1293; ZY/ZZ は Auto-LP 用に予約) を超えています。\n\n"
+            "GUI は Toggle = OFF 固定です：15 個の Tab に割り当てたスライスのみ個別ファイルとして保持され、"
             "残りのノーツは bgm.ogg にオフラインミックスされます。"
         ),
         "dialog_clear_title": "すべてクリア",
@@ -565,6 +607,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "result_bgm_none": "bgm.ogg: 未生成",
         "result_preview_line": "#PREVIEW: {path}",
         "result_placed_notes": "配置ノーツ数: {count}",
+        "result_auto_lp_line": "Auto-LP 自動補足: {count} ノーツ",
+        "result_project_json_line": "自動保存マッピング JSON: {path}",
         "result_copied_transcoded": "スライスコピー: {copied}   .ogg 変換: {transcoded}",
         "result_lane_binds": "#DTXC_LANEBINDEDCHIP 行数: {count}",
         "result_toggle_off_forced": "注意: Toggle = OFF が強制適用されました",

@@ -273,6 +273,7 @@ class TestMappingAndRenumbering(unittest.TestCase):
 
     def test_forced_toggle_off_merges_physical_siblings_and_deduplicates_capacity(self) -> None:
         from core.constants import BASE62_DIGITS
+        from core.mapping import WavLimitExceededError
 
         def _b62(n: int) -> str:
             return BASE62_DIGITS[n // 62] + BASE62_DIGITS[n % 62]
@@ -286,16 +287,19 @@ class TestMappingAndRenumbering(unittest.TestCase):
 
             # Build a #BASE 62 chart with >1295 #WAVxx definitions so chart.toggle_off_locked is True,
             # where 3 different #WAVxx IDs (with mixed casing and slashes) point to the same physical file,
-            # and the user maps 1294 unique physical files (1296 raw #WAV IDs) while requesting toggle_on=True.
+            # and the user maps 1292 unique physical files (1294 raw #WAV IDs) while requesting toggle_on=True
+            # (max capacity with Toggle=OFF is 1292 mapped files -> 02..ZX, keeping 01 for bgm.ogg and ZY/ZZ reserved).
             lines = ["#TITLE ForcedDedup", "#BASE 62", "#BPM 120"]
             lines.append("#WAVa1 sub/Shared_Celesta.wav")
             lines.append(r"#WAVa2 SUB\shared_celesta.WAV")
             lines.append("#WAVa3 sub/SHARED_CELESTA.wav")
             mapped_ids = ["a1"]
-            for i in range(1, 1294):
+            for i in range(1, 1292):
                 wid = _b62(100 + i)
                 lines.append(f"#WAV{wid} f{i}.wav")
                 mapped_ids.append(wid)
+            wid_extra = _b62(100 + 1292)
+            lines.append(f"#WAV{wid_extra} f1292.wav")
             # Add extra unmapped #WAV definitions so total > 1295 -> toggle_off_locked = True
             for j in range(1, 10):
                 wid = _b62(1500 + j)
@@ -306,9 +310,9 @@ class TestMappingAndRenumbering(unittest.TestCase):
             chart = parse_bms(bms)
             self.assertTrue(chart.toggle_off_locked)
 
-            # Request toggle_on=True with only "a1" specified alongside 1293 other unique files:
-            # Rule 5 forces effective_toggle_on=False, merges "a2" and "a3" into OTHER (1296 raw IDs,
-            # but 1294 deduplicated physical files <= 1294 Toggle=OFF limit!).
+            # Request toggle_on=True with only "a1" specified alongside 1291 other unique files:
+            # Rule 5 forces effective_toggle_on=False, merges "a2" and "a3" into OTHER (1294 raw IDs,
+            # but 1292 deduplicated physical files <= 1292 Toggle=OFF limit, filling 02..ZX!).
             plan = build_mapping_plan(
                 chart,
                 MappingConfig(
@@ -318,12 +322,24 @@ class TestMappingAndRenumbering(unittest.TestCase):
             )
             self.assertFalse(plan.effective_toggle_on)
             self.assertTrue(plan.toggle_off_forced)
-            self.assertEqual(len(plan.ordered_retained_orig_ids), 1294)
+            self.assertEqual(len(plan.ordered_retained_orig_ids), 1292)
             self.assertEqual(plan.wav_id_map["a1"], "02")
             self.assertEqual(plan.wav_id_map["a2"], "02")
             self.assertEqual(plan.wav_id_map["a3"], "02")
+            self.assertEqual(plan.wav_id_map[mapped_ids[-1]], "ZX")
+            self.assertNotIn("ZY", plan.wav_id_map.values())
+            self.assertNotIn("ZZ", plan.wav_id_map.values())
             self.assertEqual(plan.unmapped_events, [])
             self.assertEqual(len(plan.tab_placed_notes), 3)
+
+            with self.assertRaises(WavLimitExceededError):
+                build_mapping_plan(
+                    chart,
+                    MappingConfig(
+                        tab_wavs={TabId.OTHER: mapped_ids + [wid_extra]},
+                        toggle_on=True,
+                    ),
+                )
 
 
 class TestSeAllocatorSlicerCollapseAndOverflow(unittest.TestCase):
@@ -638,6 +654,311 @@ class TestSeAllocatorSlicerCollapseAndOverflow(unittest.TestCase):
             self.assertEqual(plan.dtx_wav_labels["01"], "BGM")
             self.assertEqual(plan.dtx_wav_labels[sd_bind], "SD")
             self.assertEqual(plan.dtx_wav_labels[bd_bind], "BD")
+
+    def test_reserved_zy_zz_remapped_away_and_toggle_on_limit_1293(self) -> None:
+        from core.mapping import WavLimitExceededError, int_to_base36
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "k.wav").write_bytes(b"dummy")
+            (root / "z1.wav").write_bytes(b"dummy")
+            (root / "z2.wav").write_bytes(b"dummy")
+            for i in range(1, 1295):
+                (root / f"f{i}.wav").write_bytes(b"dummy")
+
+            bms = root / "zyzz.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE ReservedZYZZ",
+                        "#BPM 120",
+                        "#WAV01 k.wav",
+                        "#WAVZY z1.wav",
+                        "#WAVZZ z2.wav",
+                        "#00111:01ZYZZ00",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+            for toggle_on in (False, True):
+                plan = build_mapping_plan(
+                    chart,
+                    MappingConfig(tab_wavs={TabId.SD: ["01", "ZY", "ZZ"]}, toggle_on=toggle_on),
+                )
+                self.assertNotIn("ZY", set(plan.wav_id_map.values()))
+                self.assertNotIn("ZZ", set(plan.wav_id_map.values()))
+                expected_first = "01" if toggle_on else "02"
+                self.assertEqual(plan.wav_id_map["01"], expected_first)
+
+            # Verify Toggle=ON capacity ceiling is 1293 (01..ZX), while Toggle=OFF rejects 1293 (> 1292).
+            lines = ["#TITLE ToggleOn1293", "#BPM 120"]
+            ids_1293 = []
+            for i in range(1, 1294):
+                wid = int_to_base36(i)
+                lines.append(f"#WAV{wid} f{i}.wav")
+                ids_1293.append(wid)
+            lines.append("#00111:01")
+            bms2 = root / "limit1293.bms"
+            bms2.write_text("\n".join(lines), encoding="utf-8")
+            chart2 = parse_bms(bms2)
+            self.assertFalse(chart2.toggle_off_locked)
+
+            plan_ok = build_mapping_plan(
+                chart2,
+                MappingConfig(tab_wavs={TabId.OTHER: ids_1293}, toggle_on=True),
+            )
+            self.assertTrue(plan_ok.effective_toggle_on)
+            self.assertEqual(plan_ok.wav_id_map[ids_1293[0]], "01")
+            self.assertEqual(plan_ok.wav_id_map[ids_1293[-1]], "ZX")
+            self.assertNotIn("ZY", set(plan_ok.wav_id_map.values()))
+            self.assertNotIn("ZZ", set(plan_ok.wav_id_map.values()))
+
+            with self.assertRaises(WavLimitExceededError):
+                build_mapping_plan(
+                    chart2,
+                    MappingConfig(tab_wavs={TabId.OTHER: ids_1293}, toggle_on=False),
+                )
+
+            extra_wid = "ZY"
+            lines_1294 = list(lines[:-1]) + [f"#WAV{extra_wid} f1294.wav", "#00111:01"]
+            bms3 = root / "limit1294.bms"
+            bms3.write_text("\n".join(lines_1294), encoding="utf-8")
+            chart3 = parse_bms(bms3)
+            self.assertTrue(chart3.toggle_off_locked)
+
+            with self.assertRaises(WavLimitExceededError):
+                build_mapping_plan(
+                    chart3,
+                    MappingConfig(tab_wavs={TabId.OTHER: ids_1293 + [extra_wid]}, toggle_on=True),
+                )
+
+    def test_auto_lp_three_physical_rules_and_consecutive_ohh(self) -> None:
+        from core.constants import AUTO_LP_CHIP_AUTO
+        from core.models import AutoLpConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("hhc.wav", "hho.wav", "lp.wav"):
+                (root / name).write_bytes(b"dummy")
+            bms = root / "rules.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE AutoLpRules",
+                        "#BPM 120",
+                        "#WAV01 hhc.wav",
+                        "#WAV02 hho.wav",
+                        "#WAV03 lp.wav",
+                        # M001: OHH at 0, first CHH at 1/8 (YES), second CHH at 2/8 (NO - rule 1)
+                        "#00111:0001010000000000",
+                        "#00118:02000000",
+                        # M002: OHH at 0, orig LP (on BMS playable ch 12 -> mapped to LP 1B) at 1/8, CHH at 2/8 (NO - rule 2 strictly between)
+                        "#00218:02000000",
+                        "#00212:0003000000000000",
+                        "#00211:0000010000000000",
+                        # M003: OHH at 0, orig LP AND CHH both at 1/8 (NO - rule 2 same tick)
+                        "#00318:02000000",
+                        "#00312:0003000000000000",
+                        "#00311:0001000000000000",
+                        # M004: OHH1 at 0, OHH2 at 1/4, CHH at 2/4 (YES - rule 3 resets to OHH2 -> 1/4 <= 1/4)
+                        "#00418:02020000",
+                        "#00411:00000100",
+                        # M005: OHH at 0, CHH at 3/8 (> 1/4 -> NO)
+                        "#00518:02000000",
+                        "#00511:0000000100000000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+            plan = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={
+                        TabId.HH_CLOSE: ["01"],
+                        TabId.HH_OPEN: ["02"],
+                        TabId.LP: ["03"],
+                    },
+                    auto_lp=AutoLpConfig(
+                        chip_mode=AUTO_LP_CHIP_AUTO,
+                        volume=70,
+                        threshold_mode="note_value",
+                        note_num=1,
+                        note_den=4,
+                    ),
+                ),
+            )
+            self.assertEqual(plan.auto_lp_placed_count, 2)
+            self.assertEqual(plan.auto_lp_orig_wav_id, "03")
+            self.assertEqual(plan.wav_volumes.get("ZY"), 70)
+            zy_notes = [n for n in plan.tab_placed_notes if n.dtx_wav_id == "ZY"]
+            self.assertEqual(len(zy_notes), 2)
+            self.assertEqual(
+                [(n.measure, n.channel, n.pos.numerator, n.pos.denominator) for n in zy_notes],
+                [(1, "1B", 1, 8), (4, "1B", 1, 2)],
+            )
+
+    def test_auto_lp_note_value_with_time_signature_and_ms_with_bpm_changes(self) -> None:
+        from core.constants import AUTO_LP_CHIP_EMPTY_ZZ
+        from core.models import AutoLpConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("hhc.wav", "hho.wav"):
+                (root / name).write_bytes(b"dummy")
+            # Part A: 3/4 time (#00102:0.75). Each step in a 3-cell lane = 0.75 * 1/3 = 1/4 whole note!
+            # So OHH at 0 and CHH at 1/3 in M001 has delta = 1/4 -> triggers <= 1/4.
+            # M002 has 4/4 time, OHH at 0 and CHH at 3/8 -> triggers only when threshold allows, not 1/4.
+            bms_ts = root / "timesig.bms"
+            bms_ts.write_text(
+                "\n".join(
+                    [
+                        "#TITLE AutoLpTimeSig",
+                        "#BPM 120",
+                        "#WAV01 hhc.wav",
+                        "#WAV02 hho.wav",
+                        "#00102:0.75",
+                        "#00118:020000",
+                        "#00111:000100",
+                        "#00218:02000000",
+                        "#00211:0000000100000000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart_ts = parse_bms(bms_ts)
+            plan_ts = build_mapping_plan(
+                chart_ts,
+                MappingConfig(
+                    tab_wavs={TabId.HH_CLOSE: ["01"], TabId.HH_OPEN: ["02"]},
+                    auto_lp=AutoLpConfig(
+                        chip_mode=AUTO_LP_CHIP_EMPTY_ZZ,
+                        threshold_mode="note_value",
+                        note_num=1,
+                        note_den=4,
+                    ),
+                ),
+            )
+            self.assertEqual(plan_ts.auto_lp_placed_count, 1)
+            self.assertTrue(plan_ts.auto_lp_use_silent_zz)
+            self.assertEqual(plan_ts.wav_volumes.get("ZZ"), 0)
+            zz_notes = [n for n in plan_ts.tab_placed_notes if n.dtx_wav_id == "ZZ"]
+            self.assertEqual([(n.measure, n.channel) for n in zz_notes], [(1, "1B")])
+
+            # Part B: ms threshold across BPM changes (#BPM01 240 & channel 03/08).
+            # Base BPM=120 -> 1 measure = 2000ms -> 1/4 = 500ms (> 250ms, NO).
+            # Measure 2 switches to BPM 240 (#03: F0 = 240) at beat 0 -> 1/4 = 250ms (<= 250.0ms, YES).
+            # Measure 3 switches to extended BPM01 (#BPM01 480 via 08) -> 1/4 = 125ms (<= 250.0ms, YES).
+            bms_ms = root / "bpm_ms.bms"
+            bms_ms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE AutoLpBpmMs",
+                        "#BPM 120",
+                        "#BPM01 480",
+                        "#WAV01 hhc.wav",
+                        "#WAV02 hho.wav",
+                        "#00118:02000000",
+                        "#00111:00010000",
+                        "#00203:F000",
+                        "#00218:02000000",
+                        "#00211:00010000",
+                        "#00308:0100",
+                        "#00318:02000000",
+                        "#00311:00010000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart_ms = parse_bms(bms_ms)
+            plan_ms = build_mapping_plan(
+                chart_ms,
+                MappingConfig(
+                    tab_wavs={TabId.HH_CLOSE: ["01"], TabId.HH_OPEN: ["02"]},
+                    auto_lp=AutoLpConfig(
+                        chip_mode=AUTO_LP_CHIP_EMPTY_ZZ,
+                        threshold_mode="ms",
+                        threshold_ms=250.0,
+                    ),
+                ),
+            )
+            self.assertEqual(plan_ms.auto_lp_placed_count, 2)
+            zz_ms = [n for n in plan_ms.tab_placed_notes if n.dtx_wav_id == "ZZ"]
+            self.assertEqual([(n.measure, n.channel) for n in zz_ms], [(2, "1B"), (3, "1B")])
+
+    def test_auto_lp_chip_mode_auto_fallback_chain(self) -> None:
+        from core.constants import AUTO_LP_CHIP_AUTO
+        from core.models import AutoLpConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("hhc.wav", "hho.wav", "lp_rare.wav", "lp_freq.wav"):
+                (root / name).write_bytes(b"dummy")
+            bms = root / "fallback.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE AutoLpFallback",
+                        "#BPM 120",
+                        "#WAV01 hhc.wav",
+                        "#WAV02 hho.wav",
+                        "#WAV03 lp_rare.wav",
+                        "#WAV04 lp_freq.wav",
+                        # LP notes on BMS ch 12: 03 appears once in chart, 04 appears 3 times -> 04 is most frequent
+                        "#00112:03040404",
+                        # M002: OHH at 0, CHH at 1/8
+                        "#00218:02000000",
+                        "#00211:00010000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+
+            # 1) LP default bind set -> picks default bind ("03")
+            plan_bind = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={
+                        TabId.HH_CLOSE: ["01"],
+                        TabId.HH_OPEN: ["02"],
+                        TabId.LP: ["03", "04"],
+                    },
+                    default_lane_binds={TabId.LP: "03"},
+                    auto_lp=AutoLpConfig(chip_mode=AUTO_LP_CHIP_AUTO, volume=60),
+                ),
+            )
+            self.assertEqual(plan_bind.auto_lp_orig_wav_id, "03")
+            self.assertEqual(plan_bind.auto_lp_placed_count, 1)
+
+            # 2) No LP default bind -> picks most frequent LP slice ("04")
+            plan_freq = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={
+                        TabId.HH_CLOSE: ["01"],
+                        TabId.HH_OPEN: ["02"],
+                        TabId.LP: ["03", "04"],
+                    },
+                    auto_lp=AutoLpConfig(chip_mode=AUTO_LP_CHIP_AUTO, volume=60),
+                ),
+            )
+            self.assertEqual(plan_freq.auto_lp_orig_wav_id, "04")
+            self.assertEqual(plan_freq.auto_lp_placed_count, 1)
+
+            # 3) Empty LP Tab -> safe no-op
+            plan_empty = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={TabId.HH_CLOSE: ["01"], TabId.HH_OPEN: ["02"]},
+                    auto_lp=AutoLpConfig(chip_mode=AUTO_LP_CHIP_AUTO, volume=60),
+                ),
+            )
+            self.assertIsNone(plan_empty.auto_lp_orig_wav_id)
+            self.assertEqual(plan_empty.auto_lp_placed_count, 0)
+            self.assertNotIn("ZY", plan_empty.wav_volumes)
+            self.assertNotIn("ZZ", plan_empty.wav_volumes)
 
 
 if __name__ == "__main__":

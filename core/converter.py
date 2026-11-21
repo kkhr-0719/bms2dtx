@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 from fractions import Fraction
+import json
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .audio_resolver import ParentFolderAudioIndex
+from .constants import (
+    AUTO_LP_CHIP_NONE,
+    AUTO_LP_RESONANT_WAV_ID,
+    AUTO_LP_SILENT_FILENAME,
+    AUTO_LP_SILENT_WAV_ID,
+    AUTO_LP_THRESHOLD_MS,
+    AUTO_LP_THRESHOLD_NOTE,
+    AUTO_LP_VALID_DENOMINATORS,
+    PROJECT_MAPPING_FILENAME,
+    TabId,
+)
 from .dtx_writer import generate_dtx_text, write_dtx_file
 from .mapping import build_mapping_plan
 from .mixer import (
@@ -15,8 +27,10 @@ from .mixer import (
     materialize_preview_audio,
     materialize_retained_slices,
     render_bgm_ogg,
+    write_silent_wav,
 )
 from .models import (
+    AutoLpConfig,
     BmsChart,
     ConversionOptions,
     ConversionResult,
@@ -27,6 +41,76 @@ from .models import (
 )
 from .parser import parse_bms
 from .se_allocator import allocate_se_channels
+
+
+def parse_auto_lp_config(raw: Any) -> AutoLpConfig:
+    """Safely parse serialized auto_lp dictionary into an AutoLpConfig."""
+    if not isinstance(raw, dict):
+        return AutoLpConfig()
+    chip_mode = str(raw.get("chip_mode", AUTO_LP_CHIP_NONE)).strip() or AUTO_LP_CHIP_NONE
+    try:
+        volume = max(0, min(100, int(raw.get("volume", 50))))
+    except (TypeError, ValueError):
+        volume = 50
+    thresh_mode = str(raw.get("threshold_mode", AUTO_LP_THRESHOLD_NOTE)).strip().lower()
+    if thresh_mode not in (AUTO_LP_THRESHOLD_NOTE, AUTO_LP_THRESHOLD_MS):
+        thresh_mode = AUTO_LP_THRESHOLD_NOTE
+    try:
+        note_num = max(1, int(raw.get("note_num", 1)))
+    except (TypeError, ValueError):
+        note_num = 1
+    try:
+        raw_den = int(raw.get("note_den", 4))
+    except (TypeError, ValueError):
+        raw_den = 4
+    note_den = raw_den if raw_den in AUTO_LP_VALID_DENOMINATORS else 4
+    try:
+        threshold_ms = max(0.0, float(raw.get("threshold_ms", 250.0)))
+    except (TypeError, ValueError):
+        threshold_ms = 250.0
+    return AutoLpConfig(
+        chip_mode=chip_mode,
+        volume=volume,
+        threshold_mode=thresh_mode,
+        note_num=note_num,
+        note_den=note_den,
+        threshold_ms=threshold_ms,
+    )
+
+
+def build_project_mapping_dict(
+    config: MappingConfig,
+    *,
+    swap_lr: bool = False,
+    tab_wavs_override: Optional[Dict[TabId, List[str]]] = None,
+    default_binds_override: Optional[Dict[TabId, str]] = None,
+) -> Dict[str, Any]:
+    """Serialize full mapping configuration (for __bms2dtx.json auto-save & Save JSON)."""
+    src_tabs = tab_wavs_override if tab_wavs_override is not None else config.tab_wavs
+    src_binds = (
+        default_binds_override
+        if default_binds_override is not None
+        else config.default_lane_binds
+    )
+    alp = config.auto_lp
+    data: Dict[str, Any] = {
+        "version": "0.3.0",
+        "tab_wavs": {t.value: list(ids) for t, ids in src_tabs.items() if ids},
+        "default_lane_binds": {t.value: w for t, w in src_binds.items() if w},
+        "default_bind_mode": config.default_bind_mode,
+        "toggle_on": False,
+        "separate_lbd": bool(config.separate_lbd),
+        "swap_lr": bool(swap_lr),
+        "auto_lp": {
+            "chip_mode": str(alp.chip_mode or AUTO_LP_CHIP_NONE),
+            "volume": max(0, min(100, int(alp.volume))),
+            "threshold_mode": str(alp.threshold_mode or AUTO_LP_THRESHOLD_NOTE),
+            "note_num": max(1, int(alp.note_num)),
+            "note_den": int(alp.note_den) if int(alp.note_den) in AUTO_LP_VALID_DENOMINATORS else 4,
+            "threshold_ms": max(0.0, float(alp.threshold_ms)),
+        },
+    }
+    return data
 
 
 def inspect_bms(path: Path | str) -> BmsChart:
@@ -118,6 +202,7 @@ def convert_bms(
                 overflow_strategy="fail",
                 separate_lbd=config.separate_lbd,
                 default_bind_mode=config.default_bind_mode,
+                auto_lp=config.auto_lp,
             )
             plan = build_mapping_plan(chart, fallback_cfg, auto_merge_duplicates=False)
             all_warnings.extend(plan.warnings)
@@ -218,10 +303,12 @@ def convert_bms(
         )
         all_warnings.extend(bga_warnings)
 
-    # Build final DTX #WAVxx table in exact sequential Base-36 order
+    # Build final DTX #WAVxx table in exact sequential Base-36 order (01..ZX),
+    # then append reserved Auto-LP ZY / ZZ entries if enabled.
     dtx_wav_table: List[Tuple[str, str]] = []
     if not effective_toggle_on:
         dtx_wav_table.append(("01", "bgm.ogg"))
+    slot_to_out_name: Dict[str, str] = {}
     for orig_wid in plan.ordered_retained_orig_ids:
         dtx_wid = plan.wav_id_map[orig_wid]
         out_name = orig_to_out_name.get(orig_wid)
@@ -229,6 +316,34 @@ def convert_bms(
             entry = chart.wavs.get(orig_wid)
             out_name = entry.resolved_name if entry else f"missing_{orig_wid}.wav"
         dtx_wav_table.append((dtx_wid, out_name))
+        slot_to_out_name[dtx_wid] = out_name
+
+    if plan.auto_lp_orig_wav_id is not None:
+        zy_out = orig_to_out_name.get(plan.auto_lp_orig_wav_id)
+        if zy_out is None:
+            mapped_slot = plan.wav_id_map.get(plan.auto_lp_orig_wav_id)
+            if mapped_slot is not None:
+                zy_out = slot_to_out_name.get(mapped_slot)
+        if zy_out is not None:
+            dtx_wav_table.append((AUTO_LP_RESONANT_WAV_ID, zy_out))
+
+    if plan.auto_lp_use_silent_zz:
+        claimed_lower = {name.replace("\\", "/").lower() for name in claimed_names}
+        if not effective_toggle_on:
+            claimed_lower.add("bgm.ogg")
+        silent_name = AUTO_LP_SILENT_FILENAME
+        if silent_name.lower() in claimed_lower:
+            stem = Path(AUTO_LP_SILENT_FILENAME).stem
+            suffix = Path(AUTO_LP_SILENT_FILENAME).suffix
+            counter = 1
+            while f"{stem}_{counter}{suffix}".lower() in claimed_lower:
+                counter += 1
+            silent_name = f"{stem}_{counter}{suffix}"
+        claimed_names.append(silent_name)
+        if options.copy_retained_audio:
+            silent_path = write_silent_wav(output_dir / silent_name)
+            copied_files.append(silent_path)
+        dtx_wav_table.append((AUTO_LP_SILENT_WAV_ID, silent_name))
 
     # Render bgm.ogg in Toggle=OFF mode
     bgm_path: Optional[Path] = None
@@ -267,6 +382,7 @@ def convert_bms(
         background_filename=background_rel,
         dtx_wav_labels=plan.dtx_wav_labels,
         wav_labels=options.wav_labels,
+        wav_volumes=plan.wav_volumes,
         bga_headers=bga_headers,
         bga_placed_events=bga_placed_events,
     )
@@ -276,6 +392,15 @@ def convert_bms(
         dtx_text, dtx_path, utf8=options.utf8
     )
     all_warnings.extend(enc_warnings)
+
+    # Auto-save reproducible project mapping JSON (__bms2dtx.json) inside output_dir
+    project_json_path = output_dir / PROJECT_MAPPING_FILENAME
+    if project_json_path.resolve() not in referenced_src_files:
+        project_dict = build_project_mapping_dict(config, swap_lr=options.swap_lr)
+        project_json_path.write_text(
+            json.dumps(project_dict, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     return ConversionResult(
         chart=chart,
@@ -299,6 +424,8 @@ def convert_bms(
         preimage_path=preimage_dst,
         background_path=background_dst,
         bga_copied_files=bga_copied_files,
+        auto_lp_placed_count=plan.auto_lp_placed_count,
+        project_json_path=project_json_path,
     )
 
 

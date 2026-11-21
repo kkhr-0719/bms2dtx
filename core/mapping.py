@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .constants import (
+    AUTO_LP_CHIP_AUTO,
+    AUTO_LP_CHIP_EMPTY_ZZ,
+    AUTO_LP_CHIP_NONE,
+    AUTO_LP_RESONANT_WAV_ID,
+    AUTO_LP_SILENT_WAV_ID,
+    AUTO_LP_THRESHOLD_MS,
+    AUTO_LP_VALID_DENOMINATORS,
     DRUM_TABS,
     DTX_MAX_MAPPED_SLOTS_TOGGLE_OFF,
     DTX_MAX_WAV_SLOTS,
@@ -45,6 +52,10 @@ class MappingPlan:
     tab_collision_events: List[NoteEvent] = field(default_factory=list)
     warnings: List[ConversionWarning] = field(default_factory=list)
     dtx_wav_labels: Dict[str, str] = field(default_factory=dict)
+    wav_volumes: Dict[str, int] = field(default_factory=dict)
+    auto_lp_orig_wav_id: Optional[str] = None
+    auto_lp_use_silent_zz: bool = False
+    auto_lp_placed_count: int = 0
 
 
 def resolve_auto_bind_wav_id(
@@ -336,6 +347,7 @@ def build_mapping_plan(
 
     # 4. Generate #DTXC_LANEBINDEDCHIP lines (only for drum tabs 1..12)
     normalized_binds: Dict[TabId, str] = {}
+    bound_orig_by_tab: Dict[TabId, str] = {}
     explicit_unbind_tabs: Set[TabId] = set()
     auto_bind_tabs: Set[TabId] = set()
     raw_bind_tabs: Set[TabId] = {_resolve_tab_key(rt) for rt in config.default_lane_binds}
@@ -368,6 +380,7 @@ def build_mapping_plan(
                 f"Default bound WAV {wid!r} for tab {tab.value} is not mapped into any retained WAV."
             )
         normalized_binds[tab] = wav_id_map[wid]
+        bound_orig_by_tab[tab] = wid
 
     global_auto_bind = str(config.default_bind_mode).strip().lower() == "auto"
     for tab in DRUM_TABS:
@@ -381,6 +394,7 @@ def build_mapping_plan(
         best_orig = resolve_auto_bind_wav_id(chart, tab_wids)
         if best_orig is not None and best_orig in wav_id_map:
             normalized_binds[tab] = wav_id_map[best_orig]
+            bound_orig_by_tab[tab] = best_orig
 
     lane_bind_lines: List[str] = []
     for lane_code, main_tab, sub_tab in DTXC_BIND_LANES:
@@ -509,6 +523,144 @@ def build_mapping_plan(
         if tab is not None:
             dtx_wav_labels[dtx_wid] = tab.value
 
+    # 6. Auto-LP (OHH 18 -> CHH 11 automatic LP 1B pedal insertion) using permanently reserved ZY/ZZ
+    wav_volumes: Dict[str, int] = {}
+    auto_lp_orig_wav_id: Optional[str] = None
+    auto_lp_use_silent_zz = False
+    auto_lp_placed_count = 0
+
+    auto_lp_cfg = config.auto_lp
+    raw_chip_mode = str(auto_lp_cfg.chip_mode or AUTO_LP_CHIP_NONE).strip()
+    mode_lower = raw_chip_mode.lower()
+    target_lp_dtx_wid: Optional[str] = None
+
+    slot_to_canonical_orig: Dict[str, str] = {
+        wav_id_map[wid]: wid for wid in ordered_retained_orig_ids
+    }
+
+    if mode_lower == AUTO_LP_CHIP_EMPTY_ZZ:
+        target_lp_dtx_wid = AUTO_LP_SILENT_WAV_ID
+        auto_lp_use_silent_zz = True
+        wav_volumes[AUTO_LP_SILENT_WAV_ID] = 0
+        dtx_wav_labels[AUTO_LP_SILENT_WAV_ID] = "LP_GHOST"
+    elif mode_lower == AUTO_LP_CHIP_AUTO:
+        lp_orig = bound_orig_by_tab.get(TabId.LP)
+        if lp_orig is None and normalized_tab_wavs[TabId.LP]:
+            lp_orig = resolve_auto_bind_wav_id(chart, normalized_tab_wavs[TabId.LP])
+        if lp_orig is not None and lp_orig in wav_id_map:
+            canonical_orig = slot_to_canonical_orig.get(wav_id_map[lp_orig], lp_orig)
+            target_lp_dtx_wid = AUTO_LP_RESONANT_WAV_ID
+            auto_lp_orig_wav_id = canonical_orig
+            wav_volumes[AUTO_LP_RESONANT_WAV_ID] = max(0, min(100, int(auto_lp_cfg.volume)))
+            dtx_wav_labels[AUTO_LP_RESONANT_WAV_ID] = TabId.LP.value
+    elif mode_lower not in ("", AUTO_LP_CHIP_NONE):
+        cand_wid = _norm_wav_id(chart, raw_chip_mode)
+        if cand_wid in wav_id_map and wav_to_tab.get(cand_wid) == TabId.LP:
+            canonical_orig = slot_to_canonical_orig.get(wav_id_map[cand_wid], cand_wid)
+            target_lp_dtx_wid = AUTO_LP_RESONANT_WAV_ID
+            auto_lp_orig_wav_id = canonical_orig
+            wav_volumes[AUTO_LP_RESONANT_WAV_ID] = max(0, min(100, int(auto_lp_cfg.volume)))
+            dtx_wav_labels[AUTO_LP_RESONANT_WAV_ID] = TabId.LP.value
+        else:
+            warnings.append(
+                ConversionWarning(
+                    code="AUTO_LP_UNMAPPED_CHIP",
+                    message=(
+                        f"Auto-LP chip {raw_chip_mode!r} is not mapped to the LP Tab; "
+                        f"skipped automatic LP insertion."
+                    ),
+                )
+            )
+
+    if target_lp_dtx_wid is not None:
+        ohh_by_tick: Dict[Tuple[int, Fraction], PlacedDtxNote] = {}
+        chh_by_tick: Dict[Tuple[int, Fraction], PlacedDtxNote] = {}
+        lp_ticks: Set[Tuple[int, Fraction]] = set()
+        for note in tab_placed_notes:
+            tick = (note.measure, note.pos)
+            if note.channel == "18":
+                ohh_by_tick[tick] = note
+            elif note.channel == "11":
+                chh_by_tick[tick] = note
+            elif note.channel == "1B":
+                lp_ticks.add(tick)
+
+        if ohh_by_tick and chh_by_tick:
+            thresh_mode = (
+                str(auto_lp_cfg.threshold_mode or "note_value").strip().lower()
+            )
+            num = max(1, int(auto_lp_cfg.note_num))
+            raw_den = int(auto_lp_cfg.note_den)
+            den = raw_den if raw_den in AUTO_LP_VALID_DENOMINATORS else 4
+            max_whole_diff = Fraction(num, den)
+            max_ms_diff = max(0.0, float(auto_lp_cfg.threshold_ms))
+
+            max_used_m = max(
+                max((k[0] for k in ohh_by_tick.keys()), default=0),
+                max((k[0] for k in chh_by_tick.keys()), default=0),
+            )
+            measure_len_frac: Dict[int, Fraction] = {}
+            measure_cum_whole: List[Fraction] = [Fraction(0)]
+            for m_idx in range(max_used_m + 1):
+                raw_len = chart.measure_lengths.get(m_idx, 1.0)
+                if raw_len <= 0:
+                    raw_len = 1.0
+                ml_frac = Fraction(raw_len).limit_denominator(1920)
+                measure_len_frac[m_idx] = ml_frac
+                measure_cum_whole.append(measure_cum_whole[-1] + ml_frac)
+
+            def _whole_pos(m_idx: int, p: Fraction) -> Fraction:
+                return measure_cum_whole[m_idx] + p * measure_len_frac[m_idx]
+
+            all_ticks = sorted(set(ohh_by_tick.keys()) | set(chh_by_tick.keys()) | lp_ticks)
+            pending_ohh: Optional[PlacedDtxNote] = None
+            lp_seen_since_ohh = False
+            inserted_lp_notes: List[PlacedDtxNote] = []
+
+            for tick in all_ticks:
+                has_lp_at_tick = tick in lp_ticks
+                if tick in chh_by_tick and pending_ohh is not None:
+                    ohh = pending_ohh
+                    chh = chh_by_tick[tick]
+                    # Rule 1: Only first CHH after OHH consumes the pending open state
+                    pending_ohh = None
+                    # Rule 2: Skip if any original LP appeared since OHH or exists on this CHH tick
+                    if not lp_seen_since_ohh and not has_lp_at_tick:
+                        if thresh_mode == AUTO_LP_THRESHOLD_MS:
+                            dt_ms = (chh.time_sec - ohh.time_sec) * 1000.0
+                            within_threshold = 0.0 < dt_ms <= (max_ms_diff + 1e-6)
+                        else:
+                            dt_whole = _whole_pos(chh.measure, chh.pos) - _whole_pos(
+                                ohh.measure, ohh.pos
+                            )
+                            within_threshold = Fraction(0) < dt_whole <= max_whole_diff
+                        if within_threshold:
+                            inserted_lp_notes.append(
+                                PlacedDtxNote(
+                                    measure=chh.measure,
+                                    pos=chh.pos,
+                                    channel="1B",
+                                    dtx_wav_id=target_lp_dtx_wid,
+                                    original_wav_id=auto_lp_orig_wav_id or AUTO_LP_SILENT_WAV_ID,
+                                    time_sec=chh.time_sec,
+                                )
+                            )
+                            lp_ticks.add(tick)
+                            has_lp_at_tick = True
+
+                if has_lp_at_tick and pending_ohh is not None:
+                    lp_seen_since_ohh = True
+
+                # Rule 3: Consecutive OHH resets anchor to the latest OHH
+                if tick in ohh_by_tick:
+                    pending_ohh = ohh_by_tick[tick]
+                    lp_seen_since_ohh = False
+
+            if inserted_lp_notes:
+                tab_placed_notes.extend(inserted_lp_notes)
+                tab_placed_notes.sort(key=lambda n: (n.measure, n.pos, n.channel))
+                auto_lp_placed_count = len(inserted_lp_notes)
+
     return MappingPlan(
         effective_toggle_on=effective_toggle_on,
         toggle_off_forced=toggle_off_forced,
@@ -524,4 +676,8 @@ def build_mapping_plan(
         tab_collision_events=tab_collision_events,
         warnings=warnings,
         dtx_wav_labels=dtx_wav_labels,
+        wav_volumes=wav_volumes,
+        auto_lp_orig_wav_id=auto_lp_orig_wav_id,
+        auto_lp_use_silent_zz=auto_lp_use_silent_zz,
+        auto_lp_placed_count=auto_lp_placed_count,
     )

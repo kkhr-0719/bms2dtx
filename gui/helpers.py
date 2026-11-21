@@ -12,9 +12,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from core import (
+    AUTO_LP_CHIP_AUTO,
+    AUTO_LP_CHIP_EMPTY_ZZ,
+    AUTO_LP_CHIP_NONE,
     DRUM_TABS,
+    PROJECT_MAPPING_FILENAME,
     TAB_SPEC_MAP,
     TAB_SPECS,
+    AutoLpConfig,
     BmsChart,
     ConversionResult,
     MappingConfig,
@@ -22,6 +27,8 @@ from core import (
     WavEntry,
     base36_to_int,
     base62_to_int,
+    build_project_mapping_dict,
+    parse_auto_lp_config,
     resolve_auto_bind_wav_id,
 )
 
@@ -184,6 +191,8 @@ class AssignmentModel:
     explicit_unbinds: set[TabId] = field(default_factory=set)
     separate_lbd: bool = False
     default_bind_mode: str = "auto"
+    auto_lp: AutoLpConfig = field(default_factory=AutoLpConfig)
+    swap_lr: bool = False
     chart: Optional[BmsChart] = field(default=None, repr=False, compare=False)
 
     def set_chart(self, chart: Optional[BmsChart]) -> None:
@@ -192,11 +201,23 @@ class AssignmentModel:
     def set_default_bind_mode(self, mode: str) -> None:
         self.default_bind_mode = "auto" if str(mode).strip().lower() == "auto" else "manual"
 
+    @staticmethod
+    def _copy_auto_lp(cfg: AutoLpConfig) -> AutoLpConfig:
+        return AutoLpConfig(
+            chip_mode=cfg.chip_mode,
+            volume=int(cfg.volume),
+            threshold_mode=cfg.threshold_mode,
+            note_num=int(cfg.note_num),
+            note_den=int(cfg.note_den),
+            threshold_ms=float(cfg.threshold_ms),
+        )
+
     def clear(self) -> None:
         for tab in self.tab_wavs:
             self.tab_wavs[tab] = []
         self.default_binds.clear()
         self.explicit_unbinds.clear()
+        self.auto_lp = AutoLpConfig()
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a detached copy of mapping state for Undo/Redo."""
@@ -206,6 +227,8 @@ class AssignmentModel:
             "explicit_unbinds": set(self.explicit_unbinds),
             "separate_lbd": bool(self.separate_lbd),
             "default_bind_mode": self.default_bind_mode,
+            "auto_lp": self._copy_auto_lp(self.auto_lp),
+            "swap_lr": bool(self.swap_lr),
         }
 
     def restore(self, snap: Dict[str, Any]) -> None:
@@ -218,6 +241,10 @@ class AssignmentModel:
         self.separate_lbd = bool(snap.get("separate_lbd", False))
         if "default_bind_mode" in snap:
             self.set_default_bind_mode(str(snap["default_bind_mode"]))
+        if "auto_lp" in snap and isinstance(snap["auto_lp"], AutoLpConfig):
+            self.auto_lp = self._copy_auto_lp(snap["auto_lp"])
+        if "swap_lr" in snap:
+            self.swap_lr = bool(snap["swap_lr"])
 
     def set_separate_lbd(self, enabled: bool) -> None:
         self.separate_lbd = bool(enabled)
@@ -310,6 +337,8 @@ class AssignmentModel:
         self.tab_wavs[tab] = kept
         if self.default_binds.get(tab) in removed:
             del self.default_binds[tab]
+        if tab == TabId.LP and self.auto_lp.chip_mode in removed:
+            self.auto_lp.chip_mode = AUTO_LP_CHIP_NONE
         if not kept:
             self.explicit_unbinds.discard(tab)
         return removed
@@ -405,18 +434,17 @@ class AssignmentModel:
             toggle_on=False,
             separate_lbd=self.separate_lbd,
             default_bind_mode=self.default_bind_mode,
+            auto_lp=self._copy_auto_lp(self.auto_lp),
         )
 
-    # ----- JSON (matches cli.py --map-json) -----
+    # ----- JSON (matches cli.py --map-json & __bms2dtx.json) -----
     def to_json_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
-            "tab_wavs": {t.value: list(ids) for t, ids in self.tab_wavs.items() if ids},
-            "default_lane_binds": {t.value: w for t, w in self.default_binds.items() if w},
-            "toggle_on": False,
-        }
-        if self.separate_lbd:
-            data["separate_lbd"] = True
-        return data
+        return build_project_mapping_dict(
+            self.to_mapping_config(),
+            swap_lr=self.swap_lr,
+            tab_wavs_override=self.tab_wavs,
+            default_binds_override=self.default_binds,
+        )
 
     def load_json_dict(
         self, data: Dict[str, Any], chart: Optional[BmsChart]
@@ -462,12 +490,24 @@ class AssignmentModel:
                 notes.append(tr("map_note_invalid_bind", tab=raw_tab, wav_id=raw_wid))
         if new_model.tab_wavs[TabId.LBD] or TabId.LBD in new_model.default_binds:
             new_model.separate_lbd = True
+        parsed_auto_lp = parse_auto_lp_config(data.get("auto_lp"))
+        cm_lower = parsed_auto_lp.chip_mode.lower()
+        if cm_lower not in (AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_AUTO, AUTO_LP_CHIP_EMPTY_ZZ):
+            norm_lp_wid = normalize_wav_id(active_chart, parsed_auto_lp.chip_mode)
+            if norm_lp_wid in new_model.tab_wavs[TabId.LP]:
+                parsed_auto_lp.chip_mode = norm_lp_wid
+            else:
+                parsed_auto_lp.chip_mode = AUTO_LP_CHIP_NONE
+        new_model.auto_lp = parsed_auto_lp
+        new_model.swap_lr = bool(data.get("swap_lr", self.swap_lr))
         if data.get("toggle_on"):
             notes.append(tr("map_note_toggle_on_ignored"))
         self.tab_wavs = new_model.tab_wavs
         self.default_binds = new_model.default_binds
         self.explicit_unbinds = new_model.explicit_unbinds
         self.separate_lbd = new_model.separate_lbd
+        self.auto_lp = new_model.auto_lp
+        self.swap_lr = new_model.swap_lr
         return notes
 
 
@@ -588,6 +628,42 @@ def format_tab_row(
     return text
 
 
+def auto_lp_combobox_values(
+    model: AssignmentModel, chart: Optional[BmsChart]
+) -> List[Tuple[str, str]]:
+    """``[(display_text, chip_mode_value)]`` for LP Tab's Auto-LP selector."""
+    active_chart = chart if chart is not None else model.chart
+    values: List[Tuple[str, str]] = [
+        (tr("auto_lp_chip_none"), AUTO_LP_CHIP_NONE),
+        (tr("auto_lp_chip_auto"), AUTO_LP_CHIP_AUTO),
+        (tr("auto_lp_chip_empty_zz"), AUTO_LP_CHIP_EMPTY_ZZ),
+    ]
+    for wid in model.display_ids_for_tab(TabId.LP, active_chart):
+        entry = active_chart.wavs.get(wid) if active_chart is not None else None
+        values.append((format_tab_row(entry, wid, chart=active_chart), wid))
+    return values
+
+
+def suggest_load_mapping_location(
+    chart: Optional[BmsChart],
+    last_output_dir: Optional[Path],
+    out_text: str,
+) -> Tuple[Optional[Path], Optional[str]]:
+    """Pick default directory (and __bms2dtx.json if present) for Load Mapping dialog."""
+    candidates: List[Path] = []
+    if last_output_dir is not None:
+        candidates.append(last_output_dir)
+    if out_text.strip():
+        candidates.append(Path(out_text.strip()))
+    if chart is not None:
+        candidates.append(chart.source_dir)
+    for d in candidates:
+        if d.is_dir():
+            proj = d / PROJECT_MAPPING_FILENAME
+            return d, (PROJECT_MAPPING_FILENAME if proj.is_file() else None)
+    return None, None
+
+
 def bind_combobox_values(
     model: AssignmentModel, chart: Optional[BmsChart], tab: TabId
 ) -> List[Tuple[str, Optional[str]]]:
@@ -678,6 +754,10 @@ def build_result_summary(result: ConversionResult) -> str:
     if result.preview_path is not None:
         lines.append(tr("result_preview_line", path=result.preview_path))
     lines.append(tr("result_placed_notes", count=result.placed_note_count))
+    if result.auto_lp_placed_count > 0:
+        lines.append(tr("result_auto_lp_line", count=result.auto_lp_placed_count))
+    if result.project_json_path is not None:
+        lines.append(tr("result_project_json_line", path=result.project_json_path))
     lines.append(
         tr(
             "result_copied_transcoded",
