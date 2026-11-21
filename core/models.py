@@ -59,6 +59,17 @@ class BpmChange:
 
 
 @dataclass
+class BgaEvent:
+    """A BMS BGA event on channel 04 or 07."""
+
+    measure: int
+    pos: Fraction
+    channel: str  # "04" or "07"
+    bga_id: str
+    order_index: int = 0
+
+
+@dataclass
 class TrackSummary:
     """Summary statistics for one non-empty BMS track (B1..Bn, 11..29, 51..69)."""
 
@@ -106,6 +117,10 @@ class BmsChart:
     song_duration_sec: float
     warnings: List[ConversionWarning] = field(default_factory=list)
     preview: Optional[WavEntry] = None
+    stagefile: Optional[WavEntry] = None
+    backbmp: Optional[WavEntry] = None
+    bmps: Dict[str, WavEntry] = field(default_factory=dict)
+    bga_events: List[BgaEvent] = field(default_factory=list)
 
     @property
     def full_title(self) -> str:
@@ -147,6 +162,7 @@ class MappingConfig:
     slicer_bgm_columns: List[int] = field(default_factory=list)  # up to 5 1-based B-column indices
     overflow_strategy: str = "fail"  # "fail" | "nudge_192" | "fallback_toggle_off"
     separate_lbd: bool = False  # False => sync BD default bind to lane 03 LBD sub-slot when LBD unbound
+    default_bind_mode: str = "manual"  # "manual" | "auto"
 
 
 @dataclass
@@ -165,6 +181,10 @@ class ConversionOptions:
     copy_retained_audio: bool = True
     render_bgm: bool = True  # only used in Toggle=OFF
     cut_same_wav: bool = False  # Reserved for optional mono voice-cut; v1 default is polyphonic
+    swap_lr: bool = False
+    wav_labels: Optional[Dict[str, str]] = None
+    image_mode: str = "keep"  # "keep" | "resize" | "none"
+    export_bga: bool = False
 
 
 @dataclass
@@ -218,3 +238,7 @@ class ConversionResult:
     warnings: List[ConversionWarning] = field(default_factory=list)
     nudged_overflow_count: int = 0
     preview_path: Optional[Path] = None
+    stagefile_path: Optional[Path] = None
+    preimage_path: Optional[Path] = None
+    background_path: Optional[Path] = None
+    bga_copied_files: List[Path] = field(default_factory=list)

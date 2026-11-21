@@ -225,7 +225,8 @@ class TestDtxWriterInvariants(unittest.TestCase):
             effective_toggle_on=False,
             preview_filename="sub/pre;1.ogg",
         )
-        self.assertIn("#COMMENT: Drum & Bass (w/ bms2dtx)", dtx_with)
+        self.assertIn("#GENRE: Drum & Bass", dtx_with)
+        self.assertIn("#COMMENT: via bms2dtx", dtx_with)
         self.assertIn(r"#PREVIEW: sub\pre_1.ogg", dtx_with)
         self.assertNotIn("Converted from", dtx_with)
         self.assertTrue(chart_with_genre.source_path.name.endswith(".bms"))
@@ -240,9 +241,39 @@ class TestDtxWriterInvariants(unittest.TestCase):
             lane_bind_lines=[],
             effective_toggle_on=False,
         )
-        self.assertIn("#COMMENT: prepped w/ bms2dtx", dtx_without)
+        self.assertNotIn("#GENRE:", dtx_without)
+        self.assertIn("#COMMENT: via bms2dtx", dtx_without)
         self.assertNotIn("#PREVIEW:", dtx_without)
         self.assertNotIn("Converted from", dtx_without)
+
+    def test_wav_inline_labels_sanitization_and_bga_serialization(self) -> None:
+        chart = self._make_chart(
+            "#TITLE LabelsBga\n#GENRE Jazz;Fusion\n#BPM 130\n#WAV01 a.wav\n#00101:01\n"
+        )
+        dtx_text, warnings = generate_dtx_text(
+            chart,
+            dtx_wav_table=[("01", "bgm.ogg"), ("02", "snare.wav"), ("03", "empty.wav")],
+            placed_notes=[PlacedDtxNote(1, Fraction(0), "12", "02", "01")],
+            lane_bind_lines=[],
+            effective_toggle_on=False,
+            dtx_wav_labels={"01": "BGM", "02": "SD", "03": "CUSTOM"},
+            wav_labels={"BGM": "Mix;Bg\nMain", "SD": "Snare\tHit", "CUSTOM": ""},
+            bga_headers=[("BMP", "01", "bg;1.png"), ("AVI", "02", "sub/movie.mp4")],
+            bga_placed_events=[
+                (1, Fraction(0), "04", "01"),
+                (2, Fraction(1, 2), "54", "02"),
+            ],
+        )
+        self.assertEqual(warnings, [])
+        self.assertIn("#GENRE: Jazz；Fusion", dtx_text)
+        self.assertIn("#COMMENT: via bms2dtx", dtx_text)
+        self.assertIn("#WAV01: bgm.ogg\t;MixBg Main", dtx_text)
+        self.assertIn("#WAV02: snare.wav\t;Snare Hit", dtx_text)
+        self.assertIn("#WAV03: empty.wav\r\n", dtx_text)
+        self.assertIn("#BMP01: bg_1.png", dtx_text)
+        self.assertIn(r"#AVI02: sub\movie.mp4", dtx_text)
+        self.assertIn("#00104: 01", dtx_text)
+        self.assertIn("#00254: 0002", dtx_text)
 
 
 if __name__ == "__main__":

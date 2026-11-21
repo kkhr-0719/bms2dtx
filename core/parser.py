@@ -18,13 +18,24 @@ from .constants import (
     BMS_MINE_CHANNELS,
     BMS_PLAYABLE_NORMAL_CHANNELS,
     DTX_MAX_WAV_SLOTS,
+    SUPPORTED_BGA_EXTENSIONS,
+    SUPPORTED_IMAGE_EXTENSIONS,
 )
 from .encoding import read_bms_text
-from .models import BmsChart, BpmChange, ConversionWarning, NoteEvent, TrackSummary, WavEntry
+from .models import (
+    BgaEvent,
+    BmsChart,
+    BpmChange,
+    ConversionWarning,
+    NoteEvent,
+    TrackSummary,
+    WavEntry,
+)
 from .timeline import build_timeline_for_chart
 
 _DATA_LINE_RE = re.compile(r"^#(\d{3})([0-9A-Za-z]{2})\s*:(.*)$")
 _WAV_HEADER_RE = re.compile(r"^#WAV([0-9A-Za-z]{2})\s+(.+)$", re.IGNORECASE)
+_BMP_HEADER_RE = re.compile(r"^#(?:BMP|AVI)([0-9A-Za-z]{2})\s+(.+)$", re.IGNORECASE)
 _BPM_EXT_RE = re.compile(r"^#(?:EX)?BPM([0-9A-Za-z]{2})\s+(.+)$", re.IGNORECASE)
 _STOP_HEADER_RE = re.compile(r"^#STOP([0-9A-Za-z]{2})\s+(.+)$", re.IGNORECASE)
 _GENERIC_HEADER_RE = re.compile(r"^#([A-Za-z0-9_]+)(?:\s+(.*))?$")
@@ -357,6 +368,7 @@ def parse_bms(path: Path | str) -> BmsChart:
 
     headers: Dict[str, str] = {}
     wavs: Dict[str, WavEntry] = {}
+    bmps: Dict[str, WavEntry] = {}
     ex_bpms: Dict[str, float] = {}
     stops: Dict[str, float] = {}
     measure_lengths: Dict[int, float] = {}
@@ -373,6 +385,8 @@ def parse_bms(path: Path | str) -> BmsChart:
     lnobj: Optional[str] = None
     lnobjs: Set[str] = set()
     preview_raw: Optional[str] = None
+    stagefile_raw: Optional[str] = None
+    backbmp_raw: Optional[str] = None
     reserved_00_headers: List[str] = []
 
     # First parse headers (so #BPMxx, #WAVxx, #LNOBJ are all known even if interleaved)
@@ -396,6 +410,16 @@ def parse_bms(path: Path | str) -> BmsChart:
                 continue
             fname = m_wav.group(2).strip()
             wavs[wid] = audio_index.resolve_wav(wid, fname)
+            continue
+
+        m_bmp = _BMP_HEADER_RE.match(line)
+        if m_bmp:
+            bid = norm_id(m_bmp.group(1))
+            if bid != "00":
+                fname = m_bmp.group(2).strip()
+                bmps[bid] = audio_index.resolve_media(
+                    bid, fname, SUPPORTED_BGA_EXTENSIONS
+                )
             continue
 
         m_bpm = _BPM_EXT_RE.match(line)
@@ -470,6 +494,12 @@ def parse_bms(path: Path | str) -> BmsChart:
             elif key == "PREVIEW":
                 if val_str:
                     preview_raw = val_str
+            elif key == "STAGEFILE":
+                if val_str:
+                    stagefile_raw = val_str
+            elif key == "BACKBMP":
+                if val_str:
+                    backbmp_raw = val_str
 
     if reserved_00_headers:
         warnings.append(
@@ -495,6 +525,26 @@ def parse_bms(path: Path | str) -> BmsChart:
                     ),
                 )
             )
+    else:
+        preview_entry = audio_index.discover_auto_preview(
+            excluded_paths=[
+                w.resolved_path
+                for w in wavs.values()
+                if w.exists and w.resolved_path is not None
+            ]
+        )
+
+    stagefile_entry: Optional[WavEntry] = None
+    if stagefile_raw:
+        stagefile_entry = audio_index.resolve_media(
+            "STAGEFILE", stagefile_raw, SUPPORTED_IMAGE_EXTENSIONS
+        )
+
+    backbmp_entry: Optional[WavEntry] = None
+    if backbmp_raw:
+        backbmp_entry = audio_index.resolve_media(
+            "BACKBMP", backbmp_raw, SUPPORTED_IMAGE_EXTENSIONS
+        )
 
     if initial_bpm is None:
         initial_bpm = 130.0
@@ -514,6 +564,7 @@ def parse_bms(path: Path | str) -> BmsChart:
     normal_slots: Dict[Tuple[int, str], Dict[Fraction, Tuple[str, int]]] = defaultdict(dict)
     ln_slots: Dict[Tuple[int, str], Dict[Fraction, Tuple[str, int]]] = defaultdict(dict)
     ln_raw_lines: Dict[Tuple[int, str], List[Tuple[List[str], int]]] = defaultdict(list)
+    bga_slots: Dict[Tuple[int, str], Dict[Fraction, Tuple[str, int]]] = defaultdict(dict)
     seen_non_bgm_channels: Set[str] = set()
     bpm_slots: Dict[Tuple[int, Fraction, str], float] = {}
 
@@ -659,7 +710,17 @@ def parse_bms(path: Path | str) -> BmsChart:
                 ln_raw_lines[(measure, channel)].append((row_tokens, row_base_seq))
             continue
 
-        # Ignore invisible (3x/4x), mines (Dx/Ex), BGA (04/06/07/0A), etc.
+        if channel in ("04", "07"):
+            n_slots = len(payload) // 2
+            slot_map = bga_slots[(measure, channel)]
+            for idx in range(n_slots):
+                tok = payload[2 * idx : 2 * idx + 2]
+                if tok != "00" and _VALID_TOKEN_RE.match(tok):
+                    order_seq += 1
+                    slot_map[Fraction(idx, n_slots)] = (norm_id(tok), order_seq)
+            continue
+
+        # Ignore invisible (3x/4x), mines (Dx/Ex), BGA (06/0A), etc.
         if (
             channel in BMS_INVISIBLE_CHANNELS
             or channel in BMS_MINE_CHANNELS
@@ -1030,6 +1091,20 @@ def parse_bms(path: Path | str) -> BmsChart:
             )
         )
 
+    bga_events: List[BgaEvent] = []
+    for (measure, channel), slot_map in sorted(bga_slots.items()):
+        for pos, (bid, seq) in sorted(slot_map.items()):
+            bga_events.append(
+                BgaEvent(
+                    measure=measure,
+                    pos=pos,
+                    channel=channel,
+                    bga_id=bid,
+                    order_index=seq,
+                )
+            )
+    bga_events.sort(key=lambda e: (e.measure, e.pos, e.order_index))
+
     chart = BmsChart(
         source_path=source_path,
         source_dir=source_dir,
@@ -1063,6 +1138,10 @@ def parse_bms(path: Path | str) -> BmsChart:
         song_duration_sec=0.0,
         warnings=warnings,
         preview=preview_entry,
+        stagefile=stagefile_entry,
+        backbmp=backbmp_entry,
+        bmps=bmps,
+        bga_events=bga_events,
     )
     build_timeline_for_chart(chart)
     return chart

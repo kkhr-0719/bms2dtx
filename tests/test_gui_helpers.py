@@ -236,9 +236,34 @@ class ListFormattingTests(ChartCase):
         m = AssignmentModel()
         self.assertEqual(bind_combobox_values(m, self.chart, TabId.SD), [(NO_BIND_LABEL, None)])
         m.assign(TabId.SD, ["02"])
-        values = bind_combobox_values(m, self.chart, TabId.SD)
-        self.assertEqual([v[1] for v in values], [None, "02"])
-        self.assertIn("sd.wav", values[1][0])
+        # Default v1.2 mode is 'auto': offers [Auto] sentinel first, then None, then slices
+        values_auto = bind_combobox_values(m, self.chart, TabId.SD)
+        self.assertEqual([v[1] for v in values_auto], ["__AUTO__", None, "02"])
+        self.assertIn("sd.wav", values_auto[0][0])
+        self.assertIn("sd.wav", values_auto[2][0])
+        # Switching to 'manual' omits [Auto] sentinel
+        m.set_default_bind_mode("manual")
+        values_manual = bind_combobox_values(m, self.chart, TabId.SD)
+        self.assertEqual([v[1] for v in values_manual], [None, "02"])
+        self.assertIn("sd.wav", values_manual[1][0])
+
+    def test_missing_files_with_same_filename_never_merged_in_groups(self) -> None:
+        miss_dir = self.tmp / "miss_gui"
+        miss_dir.mkdir()
+        bms = miss_dir / "miss.bms"
+        bms.write_bytes(
+            (
+                "#TITLE MissingSep\n#BPM 120\n"
+                "#WAV01 missing_kick.wav\n"
+                "#WAV02 missing_kick.wav\n"
+                "#00101:0102\n"
+            ).encode("cp932")
+        )
+        chart = inspect_bms(bms)
+        self.assertFalse(chart.wavs["01"].exists)
+        self.assertFalse(chart.wavs["02"].exists)
+        # Missing files must stay independent and never collapse into one row!
+        self.assertEqual(filter_wav_ids(chart), ["01", "02"])
 
 
 class SummaryAndExportHelperTests(ChartCase):
@@ -248,7 +273,7 @@ class SummaryAndExportHelperTests(ChartCase):
         self.assertEqual(rows["艺术家"], "Tester")
         self.assertEqual(rows["BPM"], "120")
         self.assertEqual(rows["编码"], self.chart.encoding_used)
-        self.assertEqual(rows["进制"], "Base-36")
+        self.assertEqual(rows["进制"], "Base-36 兼容")
         self.assertIn("共 5", rows["WAV 数量"])
         self.assertIn("缺失 1", rows["WAV 数量"])
         self.assertIn("BGM 列", rows)
@@ -279,14 +304,32 @@ class AutoGuessTests(unittest.TestCase):
     def test_guess_names(self) -> None:
         cases = {
             "kick01.wav": TabId.BD,
+            "kck_01.wav": TabId.BD,
+            "bdrum_2.ogg": TabId.BD,
             "BD_1.ogg": TabId.BD,
+            "キック_01.wav": TabId.BD,
+            "バスドラ.wav": TabId.BD,
             "snare.wav": TabId.SD,
+            "sn01.wav": TabId.SD,
+            "snr_hard.wav": TabId.SD,
+            "rim.wav": TabId.SD,
+            "clap02.wav": TabId.SD,
             "SD2.wav": TabId.SD,
+            "スネア_01.wav": TabId.SD,
             "hihat_closed.wav": TabId.HH_CLOSE,
+            "hhc_01.wav": TabId.HH_CLOSE,
+            "ハイハット.wav": TabId.HH_CLOSE,
             "hh_open.wav": TabId.HH_OPEN,
+            "hho.wav": TabId.HH_OPEN,
             "open hihat.wav": TabId.HH_OPEN,
+            "ハイハット_オープン.wav": TabId.HH_OPEN,
             "crash1.wav": TabId.CY,
+            "cr_02.wav": TabId.CY,
+            "cym01.wav": TabId.CY,
+            "splash_01.wav": TabId.CY,
+            "クラッシュ.wav": TabId.CY,
             "ride.wav": TabId.RD,
+            "rd01.wav": TabId.RD,
             "hightom.wav": TabId.HT,
             "lowtom.wav": TabId.LT,
             "floor tom.wav": TabId.FT,
@@ -295,13 +338,45 @@ class AutoGuessTests(unittest.TestCase):
         for name, tab in cases.items():
             self.assertEqual(guess_tab_for_filename(name), tab, name)
 
-    def test_unknown_names_return_none(self) -> None:
-        for name in ("piano_c4.wav", "bass_synth.wav", "voice01.ogg", "123.wav", ""):
+    def test_unknown_names_and_boundary_safety_return_none(self) -> None:
+        for name in (
+            "piano_c4.wav",
+            "bass_synth.wav",
+            "voice01.ogg",
+            "123.wav",
+            "",
+            "snow_lead.wav",
+            "synth_pad.wav",
+            "snake_fx.wav",
+            "crisp_bell_synth.wav",
+        ):
+            if "bell" in name:
+                continue  # 'bell' token maps to RD; test crisp_fx instead
             self.assertIsNone(guess_tab_for_filename(name), name)
+        self.assertIsNone(guess_tab_for_filename("crisp_fx.wav"))
 
-    def test_guess_assignments_groups_ids(self) -> None:
-        res = guess_assignments([("01", "kick.wav"), ("02", "x.wav"), ("03", "kick2.wav"), ("04", "snare.wav")])
-        self.assertEqual(res, {TabId.BD: ["01", "03"], TabId.SD: ["04"]})
+    def test_guess_assignments_groups_ids_and_tom_sequence(self) -> None:
+        res = guess_assignments(
+            [
+                ("01", "kick.wav"),
+                ("02", "snow_01.wav"),
+                ("03", "kick2.wav"),
+                ("04", "sn04.wav"),
+                ("05", "048_TOM1.wav"),
+                ("06", "045_TOM2.wav"),
+                ("07", "041_TOM3.wav"),
+            ]
+        )
+        self.assertEqual(
+            res,
+            {
+                TabId.BD: ["01", "03"],
+                TabId.SD: ["04"],
+                TabId.HT: ["05"],
+                TabId.LT: ["06"],
+                TabId.FT: ["07"],
+            },
+        )
 
 
 # ----------------------------------------------------------------- preview player
@@ -457,6 +532,57 @@ class PreviewPlayerTests(unittest.TestCase):
         self.assertEqual(self.ws.calls[-1], (None, FakeWinsound.SND_PURGE))
         self.assertFalse(player.play(self.src_ogg))
 
+    def test_swap_lr_forwarded_and_ffmpeg_swaps_decoded_channels(self) -> None:
+        import math
+        import struct
+        from core.mixer import find_ffmpeg
+        from gui.preview_player import decode_with_ffmpeg
+
+        flags: List[bool] = []
+        swap_state = [False]
+
+        def cap_decoder(_ff: str, src: Path, dst: Path, *, swap_lr: bool = False) -> None:
+            flags.append(swap_lr)
+            dst.write_bytes(b"RIFF")
+
+        player = PreviewPlayer(
+            lambda: "ffmpeg.exe",
+            on_status=self.status.append,
+            winsound_module=self.ws,
+            decoder=cap_decoder,
+            temp_root=self.tmp,
+            swap_lr_getter=lambda: swap_state[0],
+        )
+        self.addCleanup(player.shutdown)
+        player.play(self.src_wav)
+        player._last_thread.join(5)
+        swap_state[0] = True
+        player.play(self.src_wav)
+        player._last_thread.join(5)
+        self.assertEqual(flags, [False, True])
+
+        # Verify decode_with_ffmpeg swaps real stereo L/R audio channels
+        ffmpeg_exe = find_ffmpeg()
+        stereo_src = self.tmp / "left_only.wav"
+        decoded_dst = self.tmp / "swapped_out.wav"
+        with wave.open(str(stereo_src), "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(44100)
+            frames = bytearray()
+            for i in range(2205):
+                val = int(round(20000 * math.sin(2.0 * math.pi * 440.0 * i / 44100)))
+                frames.extend(struct.pack("<hh", val, 0))
+            wf.writeframes(bytes(frames))
+        decode_with_ffmpeg(ffmpeg_exe, stereo_src, decoded_dst, swap_lr=True)
+        with wave.open(str(decoded_dst), "rb") as wf:
+            raw = wf.readframes(wf.getnframes())
+        samples = struct.unpack(f"<{len(raw) // 2}h", raw)
+        left_energy = sum(x * x for x in samples[0::2])
+        right_energy = sum(x * x for x in samples[1::2])
+        self.assertLess(left_energy, right_energy * 0.01)
+        self.assertGreater(right_energy, 100000)
+
 
 # --------------------------------------------------------------------- GUI (Tk)
 def _tk_root():
@@ -499,8 +625,13 @@ class I18nTests(unittest.TestCase):
         set_language("zh_CN")
         self.assertIn("#DLEVEL", tr("dlevel_label"))
 
-    def test_save_and_load_language_preference(self) -> None:
-        from gui.i18n import load_language_preference, save_language_preference
+    def test_save_and_load_language_and_app_settings(self) -> None:
+        from gui.i18n import (
+            load_app_settings,
+            load_language_preference,
+            save_app_settings,
+            save_language_preference,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "settings.json"
@@ -509,6 +640,24 @@ class I18nTests(unittest.TestCase):
             self.assertEqual(load_language_preference(cfg), "ja")
             self.assertTrue(save_language_preference("en", cfg))
             self.assertEqual(load_language_preference(cfg), "en")
+            self.assertTrue(
+                save_app_settings(
+                    {
+                        "ffmpeg_path": r"C:\tools\ffmpeg.exe",
+                        "default_bind_mode": "manual",
+                        "swap_lr": True,
+                        "wav_labels": {"BGM": "Bg;Mix\n", "SD": "Snare"},
+                    },
+                    cfg,
+                )
+            )
+            loaded = load_app_settings(cfg)
+            self.assertEqual(loaded["language"], "en")
+            self.assertEqual(loaded["ffmpeg_path"], r"C:\tools\ffmpeg.exe")
+            self.assertEqual(loaded["default_bind_mode"], "manual")
+            self.assertTrue(loaded["swap_lr"])
+            self.assertEqual(loaded["wav_labels"]["BGM"], "BgMix")
+            self.assertEqual(loaded["wav_labels"]["SD"], "Snare")
 
 
 class AppIntegrationTests(ChartCase):
@@ -536,7 +685,8 @@ class AppIntegrationTests(ChartCase):
             pass
 
     def test_layout_has_15_tabs_in_canonical_order_and_toggle_hidden(self) -> None:
-        # By default separate_lbd is unchecked -> LBD is hidden (14 visible tabs)
+        # Window title includes full loaded BMS path; slim top bar has config button
+        self.assertIn(str(self.bms), self.root.title())
         self.assertFalse(self.app.separate_lbd_var.get())
         self.assertEqual(
             self.app.visible_tabs(),
@@ -548,7 +698,8 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(self.app.visible_tabs(), [s.tab_id for s in TAB_SPECS])
         titles = [self.app.tab_buttons[s.tab_id].cget("text") for s in TAB_SPECS]
         self.assertEqual(titles, [s.label for s in TAB_SPECS])
-        self.assertEqual(str(self.app.left_list.cget("selectmode")), "extended")
+        self.assertEqual(str(self.app.left_tree.cget("selectmode")), "extended")
+        self.assertEqual(tuple(self.app.left_tree.cget("columns")), ("id", "filename", "count", "target"))
         for tab, panel in self.app.panels.items():
             self.assertEqual(str(panel.listbox.cget("selectmode")), "extended")
             self.assertEqual(panel.combo is not None, tab_has_bind_combobox(tab))
@@ -559,38 +710,48 @@ class AppIntegrationTests(ChartCase):
 
     def test_import_does_not_auto_guess(self) -> None:
         self.assertFalse(self.app.model.has_assignments)
+        self.assertFalse(self.app.dirty)
 
     def test_add_gray_remove_cycle_and_bind_reset(self) -> None:
         app = self.app
-        ids = app._left_ids
-        app.left_list.selection_set(ids.index("01"))
-        app.left_list.selection_set(ids.index("02"))
+        app.left_tree.selection_set(("01", "02"))
         app.select_tab(TabId.SD)
         app.on_add()
         self.assertEqual(app.model.tab_wavs[TabId.SD], ["01", "02"])
         self.assertEqual(app.tab_buttons[TabId.SD].cget("text"), "SD (2)")
-        i1 = app._left_ids.index("01")
-        self.assertEqual(app.left_list.itemcget(i1, "foreground"), GRAY_FOREGROUND)
-        self.assertTrue(app.left_list.get(i1).endswith("→ SD"))
+        self.assertIn("assigned", app.left_tree.item("01", "tags"))
+        self.assertEqual(app.left_tree.item("01", "values")[3], "SD")
+        self.assertEqual(str(app.left_tree.tag_configure("assigned", "foreground")), GRAY_FOREGROUND)
         # cannot double assign into another tab
-        app.left_list.selection_set(i1)
+        app.left_tree.selection_set(("01",))
         app.select_tab(TabId.BD)
         app.on_add()
         self.assertEqual(app.model.tab_wavs[TabId.BD], [])
-        # default bind combobox
+        # default bind combobox defaults to auto most-frequent ([自动最高频])
         combo = app.panels[TabId.SD].combo
-        self.assertEqual(len(combo.cget("values")), 3)
-        combo.current(1)
+        vals = combo.cget("values")
+        self.assertEqual(len(vals), 4)
+        self.assertTrue(vals[0].startswith("[自动最高频]"))
+        # select specific slice ("01" at index 2) manually
+        combo.current(2)
         app.panels[TabId.SD]._on_bind_selected()
         self.assertEqual(app.model.get_bind(TabId.SD), "01")
-        # remove bound wav -> reset combobox
+        # remove bound wav "01" -> falls back to remaining slice's auto-bind or explicit None
         app.select_tab(TabId.SD)
         app.panels[TabId.SD].listbox.selection_set(0)
         app.on_remove()
         self.assertEqual(app.model.tab_wavs[TabId.SD], ["02"])
         self.assertIsNone(app.model.get_bind(TabId.SD))
+        self.assertTrue(combo.get().startswith("[自动最高频]"))
+        # Explicitly choose (未指定 / 00) -> stays unbound
+        combo.current(1)
+        app.panels[TabId.SD]._on_bind_selected()
         self.assertEqual(combo.get(), NO_BIND_LABEL)
-        self.assertNotEqual(app.left_list.itemcget(app._left_ids.index("01"), "foreground"), GRAY_FOREGROUND)
+        self.assertNotIn("assigned", app.left_tree.item("01", "tags"))
+        # Remove remaining "02" -> empty tab shows NO_BIND_LABEL
+        app.panels[TabId.SD].listbox.selection_set(0)
+        app.on_remove()
+        self.assertEqual(combo.get(), NO_BIND_LABEL)
 
     def test_click_and_arrow_key_auto_preview_and_language_switch(self) -> None:
         app = self.app
@@ -601,8 +762,8 @@ class AppIntegrationTests(ChartCase):
             play_mock.assert_called_once_with(self.chart.wavs["02"].resolved_path)
             play_mock.reset_mock()
 
-            # Arrow key press + release cycle on index 2 ("03" -> hh_open.wav) plays once without stutter
-            app.left_list.activate(2)
+            # Arrow key press + release cycle on focus "03" -> hh_open.wav plays once without stutter
+            app.left_tree.focus("03")
             app._on_left_arrow_press()
             self.root.update()
             play_mock.assert_called_once_with(self.chart.wavs["03"].resolved_path)
@@ -611,9 +772,22 @@ class AppIntegrationTests(ChartCase):
             play_mock.reset_mock()
 
             # Direct _on_left_arrow_key call also works
-            app.left_list.activate(1)
+            app.left_tree.focus("02")
             app._on_left_arrow_key()
             play_mock.assert_called_once_with(self.chart.wavs["02"].resolved_path)
+            play_mock.reset_mock()
+
+            # Right panel click / spacebar preview sync
+            app.select_tab(TabId.BD)
+            app.model.assign(TabId.BD, ["04"], chart=self.chart)
+            app.refresh_all()
+            app.panels[TabId.BD].listbox.selection_set(0)
+            app.preview_from_tab(TabId.BD)
+            play_mock.assert_called_once_with(self.chart.wavs["04"].resolved_path)
+            play_mock.reset_mock()
+            app._last_focus_side = "right"
+            app.on_preview_button()
+            play_mock.assert_called_once_with(self.chart.wavs["04"].resolved_path)
             play_mock.reset_mock()
 
             # Uncheck auto_preview_var -> click/arrow no longer auto-plays, but spacebar preview still works
@@ -621,8 +795,8 @@ class AppIntegrationTests(ChartCase):
             app._on_left_click_index(0)
             app._on_left_arrow_key()
             play_mock.assert_not_called()
-            app.left_list.selection_clear(0, "end")
-            app.left_list.selection_set(0)
+            app.left_tree.selection_set(("01",))
+            app.left_tree.focus("01")
             app.preview_from_left()
             play_mock.assert_called_once_with(self.chart.wavs["01"].resolved_path)
             app.auto_preview_var.set(True)
@@ -645,7 +819,7 @@ class AppIntegrationTests(ChartCase):
         # Dynamic language switch + persistence (including status bar when chart is loaded)
         cfg_file = self.tmp / "gui_lang.json"
         app.config_path = cfg_file
-        app._persist_lang = True
+        app._persist_settings = True
         app.change_language("en")
         self.assertIn("Drums Level", app.dlevel_label.cget("text"))
         self.assertIn("Loaded", app.status_var.get())
@@ -658,6 +832,54 @@ class AppIntegrationTests(ChartCase):
         app.change_language("zh_CN")
         self.assertIn("鼓难度", app.dlevel_label.cget("text"))
         self.assertIn("已载入", app.status_var.get())
+
+    def test_undo_redo_entry_focus_guard_dirty_close_guard_and_drop_filter(self) -> None:
+        import tkinter as tk
+
+        app = self.app
+        self.assertFalse(app.dirty)
+
+        # Add -> dirty=True
+        app.left_tree.selection_set(("01", "02"))
+        app.select_tab(TabId.SD)
+        app.on_add()
+        self.assertTrue(app.dirty)
+        self.assertEqual(app.model.tab_wavs[TabId.SD], ["01", "02"])
+
+        # Change bind -> Undo reverts bind first
+        app.panels[TabId.SD].combo.current(2)
+        app.panels[TabId.SD]._on_bind_selected()
+        self.assertEqual(app.model.get_bind(TabId.SD), "01")
+
+        # Entry focus guard: Ctrl+Z while Entry is focused must NOT pop mapping undo stack
+        dummy_entry = tk.Entry(self.root)
+        with mock.patch.object(self.root, "focus_get", return_value=dummy_entry):
+            res = app._on_ctrl_z()
+        self.assertIsNone(res)
+        self.assertEqual(app.model.get_bind(TabId.SD), "01")
+
+        # When non-Entry has focus, Ctrl+Z undoes bind, then undoes add (returning dirty to False!)
+        with mock.patch.object(self.root, "focus_get", return_value=app.left_tree):
+            self.assertEqual(app._on_ctrl_z(), "break")
+            self.assertIsNone(app.model.get_bind(TabId.SD))
+            self.assertEqual(app._on_ctrl_z(), "break")
+            self.assertEqual(app.model.tab_wavs[TabId.SD], [])
+            self.assertFalse(app.dirty)
+            # Redo restores add and dirty=True
+            self.assertEqual(app._on_ctrl_y(), "break")
+            self.assertEqual(app.model.tab_wavs[TabId.SD], ["01", "02"])
+            self.assertTrue(app.dirty)
+
+        # Dirty close guard prompts askyesno when startup_dialogs=True and cancels close on False
+        app.startup_dialogs = True
+        with mock.patch.object(self.app_mod.messagebox, "askyesno", return_value=False) as ask:
+            app.on_close()
+            ask.assert_called_once()
+        # Drop filter rejects non-BMS file with warning and never crashes
+        with mock.patch.object(self.app_mod.messagebox, "showwarning") as warn:
+            app._handle_dropped_files([str(self.tmp / "song" / "bd.wav")])
+            warn.assert_called_once()
+        app.startup_dialogs = False
 
     def test_search_filter_updates_list(self) -> None:
         self.app.search_var.set("hh_open")
@@ -694,10 +916,15 @@ class AppIntegrationTests(ChartCase):
         app.ffmpeg_path = None
         app._update_ffmpeg_ui()
         self.assertEqual(str(app.ogg_chk.cget("state")), "disabled")
-        app.model.assign(TabId.BD, ["01"])
-        app.model.assign(TabId.SD, ["02"])
+        app.left_tree.selection_set(("01",))
+        app.select_tab(TabId.BD)
+        app.on_add()
+        app.left_tree.selection_set(("02",))
+        app.select_tab(TabId.SD)
+        app.on_add()
         app.model.set_bind(TabId.SD, "02")
         app.refresh_all()
+        self.assertTrue(app.dirty)
         out = self.tmp / "out_dtx"
         app.out_var.set(str(out))
         before = snapshot(self.bms.parent)
@@ -714,9 +941,11 @@ class AppIntegrationTests(ChartCase):
                 threading.Event().wait(0.05)
             err.assert_not_called()
         self.assertFalse(app._busy)
+        self.assertFalse(app.dirty)  # dirty resets after successful export!
         self.assertTrue((out / "test.dtx").is_file())
         text = (out / "test.dtx").read_bytes().decode("cp932")
         self.assertIn("#DTXC_LANEBINDEDCHIP: 04", text)
+        self.assertIn("\t;SD", text)
         self.assertTrue(shown and "test.dtx" in shown[0])
         self.assertEqual(snapshot(self.bms.parent), before)
 

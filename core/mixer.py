@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import array
+from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 import math
 import os
+from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
+import wave
 
+from .constants import (
+    DTX_MAX_WAV_SLOTS,
+    IMAGE_MODE_KEEP,
+    IMAGE_MODE_NONE,
+    IMAGE_MODE_RESIZE,
+    SUPPORTED_VIDEO_EXTENSIONS,
+    int_to_base36,
+)
 from .models import BmsChart, ConversionWarning, MixStats, NoteEvent
 
 try:
@@ -187,6 +198,8 @@ def _mix_with_numpy(
     decoded_raw: Dict[Path, bytes],
     scheduled: List[Tuple[int, Path]],
     total_frames: int,
+    *,
+    swap_lr: bool = False,
 ) -> Tuple[List[bytes], float, float, float, float]:
     """Fast vectorized stereo float32 mixer using numpy."""
     assert np is not None
@@ -219,6 +232,9 @@ def _mix_with_numpy(
     # Compute RMS in float64 to avoid precision loss over long songs
     rms = float(np.sqrt(np.mean(mix.astype(np.float64) ** 2))) if total_frames > 0 else 0.0
 
+    if swap_lr and total_frames > 0:
+        mix = mix[:, [1, 0]]
+
     # Yield ~2 MB chunks to ffmpeg without doubling memory
     chunk_frames = 262_144  # 262144 frames * 8 bytes = 2 MiB
     chunks: List[bytes] = []
@@ -233,6 +249,8 @@ def _mix_pure_python(
     decoded_raw: Dict[Path, bytes],
     scheduled: List[Tuple[int, Path]],
     total_frames: int,
+    *,
+    swap_lr: bool = False,
 ) -> Tuple[List[bytes], float, float, float, float]:
     """Pure-stdlib stereo float32 mixer fallback when numpy is unavailable."""
     decoded_arrs: Dict[Path, array.array] = {}
@@ -279,6 +297,10 @@ def _mix_pure_python(
         sq_sum += val * val
     rms = math.sqrt(sq_sum / total_samples) if total_samples > 0 else 0.0
 
+    if swap_lr and total_frames > 0:
+        for i in range(0, total_samples, 2):
+            mix[i], mix[i + 1] = mix[i + 1], mix[i]
+
     if need_swap:
         mix.byteswap()
 
@@ -301,6 +323,7 @@ def render_bgm_ogg(
     use_numpy: Optional[bool] = None,
     decode_cache: Optional[Dict[Tuple[Path, int], bytes]] = None,
     cut_same_wav: bool = False,
+    swap_lr: bool = False,
 ) -> Tuple[MixStats, List[ConversionWarning]]:
     """Offline-mix all unmapped BMS events along the exact timeline and export bgm.ogg.
 
@@ -395,11 +418,11 @@ def render_bgm_ogg(
     should_use_numpy = (np is not None) if use_numpy is None else (use_numpy and np is not None)
     if should_use_numpy:
         pcm_chunks, peak_before, peak_after, rms, gain = _mix_with_numpy(
-            decoded_raw, scheduled, total_frames
+            decoded_raw, scheduled, total_frames, swap_lr=swap_lr
         )
     else:
         pcm_chunks, peak_before, peak_after, rms, gain = _mix_pure_python(
-            decoded_raw, scheduled, total_frames
+            decoded_raw, scheduled, total_frames, swap_lr=swap_lr
         )
 
     if mixed_event_count == 0:
@@ -444,6 +467,166 @@ def render_bgm_ogg(
     return stats, warnings
 
 
+_FFMPEG_AUDIO_STREAM_RE = re.compile(r"Audio:.*?,\s*\d+\s*Hz,\s*([^,\r\n]+)", re.IGNORECASE)
+
+
+def _get_audio_channels(path: Path, ffmpeg_exe: Optional[str] = None) -> Optional[int]:
+    """Detect audio channel count (1 for mono, 2 for stereo, or None if unknown)."""
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as wf:
+                return int(wf.getnchannels())
+        except Exception:
+            pass
+    if ffmpeg_exe:
+        proc = subprocess.run(
+            [ffmpeg_exe, "-hide_banner", "-nostdin", "-i", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=_CREATE_NO_WINDOW,
+            check=False,
+        )
+        stderr_txt = proc.stderr.decode("utf-8", errors="replace")
+        m = _FFMPEG_AUDIO_STREAM_RE.search(stderr_txt)
+        if m:
+            layout = m.group(1).strip().lower()
+            if "mono" in layout or layout.startswith("1 channels") or layout == "1.0":
+                return 1
+            if "stereo" in layout or layout.startswith("2 channels") or layout == "2.0":
+                return 2
+            m_cnt = re.search(r"(\d+)\s*channels?", layout)
+            if m_cnt:
+                return int(m_cnt.group(1))
+    return None
+
+
+def _codec_args_for_audio(dst: Path, ogg_quality: float) -> List[str]:
+    ext = dst.suffix.lower()
+    if ext == ".wav":
+        return ["-c:a", "pcm_s16le"]
+    if ext == ".ogg":
+        return ["-c:a", "libvorbis", "-q:a", f"{ogg_quality:g}"]
+    if ext == ".flac":
+        return ["-c:a", "flac"]
+    if ext == ".mp3":
+        return ["-c:a", "libmp3lame", "-q:a", "2"]
+    return []
+
+
+def _copy_or_swap_lr_audio(
+    src: Path,
+    dst: Path,
+    *,
+    swap_lr: bool,
+    ffmpeg_exe: Optional[str],
+    ogg_quality: float = 6.0,
+) -> Optional[str]:
+    """Copy audio file or swap L/R stereo channels via ffmpeg; mono files always plain-copy."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if not swap_lr or not ffmpeg_exe:
+        shutil.copy2(src, dst)
+        return None
+    channels = _get_audio_channels(src, ffmpeg_exe)
+    if channels == 1:
+        shutil.copy2(src, dst)
+        return None
+
+    cmd = [
+        ffmpeg_exe,
+        "-v",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(src),
+        "-af",
+        "pan=stereo|c0=c1|c1=c0",
+        *_codec_args_for_audio(dst, ogg_quality),
+        str(dst),
+    ]
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        creationflags=_CREATE_NO_WINDOW,
+        check=False,
+    )
+    if proc.returncode != 0 or not dst.is_file():
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+        shutil.copy2(src, dst)
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        return err or f"ffmpeg exit code {proc.returncode}"
+    return None
+
+
+def _sanitize_rel_candidate(
+    resolved_name: str, src_path: Path, forced_suffix: Optional[str] = None
+) -> Path:
+    rel_candidate = Path(resolved_name.replace("\\", "/"))
+    if (
+        rel_candidate.is_absolute()
+        or bool(rel_candidate.drive)
+        or bool(rel_candidate.root)
+        or ".." in rel_candidate.parts
+        or str(rel_candidate) in ("", ".")
+    ):
+        rel_candidate = Path(src_path.name)
+    sanitized_parts = [part.replace(";", "_") for part in rel_candidate.parts]
+    rel_candidate = (
+        Path(*sanitized_parts)
+        if sanitized_parts
+        else Path(src_path.name.replace(";", "_"))
+    )
+    if forced_suffix is not None:
+        rel_candidate = rel_candidate.with_suffix(forced_suffix)
+    return rel_candidate
+
+
+def _disambiguate_rel(
+    rel_candidate: Path,
+    src_path: Optional[Path],
+    claimed_rel_lower: Dict[str, Optional[Path]],
+    *,
+    allow_reuse_same_src: bool = True,
+) -> Path:
+    rel_str = rel_candidate.as_posix()
+    key = rel_str.lower()
+    if key in claimed_rel_lower:
+        if allow_reuse_same_src and src_path is not None and claimed_rel_lower[key] == src_path:
+            return rel_candidate
+        stem = rel_candidate.stem
+        suffix = rel_candidate.suffix
+        parent = rel_candidate.parent
+        counter = 1
+        while True:
+            alt = (
+                (parent / f"{stem}_{counter}{suffix}")
+                if str(parent) not in ("", ".")
+                else Path(f"{stem}_{counter}{suffix}")
+            )
+            if alt.as_posix().lower() not in claimed_rel_lower:
+                return alt
+            counter += 1
+    return rel_candidate
+
+
+def _safe_output_dst(output_dir: Path, rel_candidate: Path, src_path: Path) -> Path:
+    resolved_out_root = output_dir.resolve()
+    dst_path = (resolved_out_root / rel_candidate).resolve()
+    if not dst_path.is_relative_to(resolved_out_root):
+        raise ValueError(
+            f"Refusing to write artifact outside output directory: {dst_path}"
+        )
+    if dst_path == src_path:
+        raise ValueError(
+            f"Refusing to overwrite original source file: {src_path}"
+        )
+    return dst_path
+
+
 def materialize_retained_slices(
     chart: BmsChart,
     ordered_retained_orig_ids: Sequence[str],
@@ -454,6 +637,7 @@ def materialize_retained_slices(
     ogg_quality: float = 6.0,
     ffmpeg_path: Optional[str] = None,
     reserve_bgm_ogg: bool = True,
+    swap_lr: bool = False,
 ) -> Tuple[Dict[str, str], List[Path], List[Path], List[ConversionWarning]]:
     """Copy or transcode retained slice files into output_dir (NEVER mutating source_dir).
 
@@ -467,7 +651,7 @@ def materialize_retained_slices(
 
     # Track source_path -> assigned relative output path (deduplicate shared files)
     src_to_rel_out: Dict[Path, str] = {}
-    claimed_rel_lower: Dict[str, Path] = {}
+    claimed_rel_lower: Dict[str, Optional[Path]] = {}
 
     # Reserve bgm.ogg in Toggle=OFF so no retained slice accidentally overwrites it
     if reserve_bgm_ogg:
@@ -492,42 +676,14 @@ def materialize_retained_slices(
             orig_to_out_name[orig_wid] = src_to_rel_out[src_path]
             continue
 
-        rel_candidate = Path(entry.resolved_name.replace("\\", "/"))
-        if (
-            rel_candidate.is_absolute()
-            or bool(rel_candidate.drive)
-            or bool(rel_candidate.root)
-            or ".." in rel_candidate.parts
-            or str(rel_candidate) in ("", ".")
-        ):
-            rel_candidate = Path(src_path.name)
-
-        # Sanitize DTX inline-comment delimiter ';' on every path segment before deduplication
-        sanitized_parts = [part.replace(";", "_") for part in rel_candidate.parts]
-        rel_candidate = (
-            Path(*sanitized_parts)
-            if sanitized_parts
-            else Path(src_path.name.replace(";", "_"))
-        )
-
         is_wav_transcode = transcode_wav_to_ogg and src_path.suffix.lower() == ".wav"
-        if is_wav_transcode:
-            rel_candidate = rel_candidate.with_suffix(".ogg")
-
-        # Disambiguate if a DIFFERENT source file already claimed this target name
+        rel_candidate = _sanitize_rel_candidate(
+            entry.resolved_name,
+            src_path,
+            forced_suffix=".ogg" if is_wav_transcode else None,
+        )
+        rel_candidate = _disambiguate_rel(rel_candidate, src_path, claimed_rel_lower)
         rel_str = rel_candidate.as_posix()
-        if rel_str.lower() in claimed_rel_lower and claimed_rel_lower[rel_str.lower()] != src_path:
-            stem = rel_candidate.stem
-            suffix = rel_candidate.suffix
-            parent = rel_candidate.parent
-            counter = 1
-            while True:
-                alt = (parent / f"{stem}_{counter}{suffix}") if str(parent) not in ("", ".") else Path(f"{stem}_{counter}{suffix}")
-                if alt.as_posix().lower() not in claimed_rel_lower:
-                    rel_candidate = alt
-                    rel_str = alt.as_posix()
-                    break
-                counter += 1
 
         dtx_rel = rel_str.replace("/", "\\")
         claimed_rel_lower[rel_str.lower()] = src_path
@@ -535,31 +691,62 @@ def materialize_retained_slices(
         orig_to_out_name[orig_wid] = dtx_rel
 
         if copy_files:
-            resolved_out_root = output_dir.resolve()
-            dst_path = (resolved_out_root / rel_candidate).resolve()
-            if not dst_path.is_relative_to(resolved_out_root):
-                raise ValueError(
-                    f"Refusing to write retained slice outside output directory: {dst_path}"
-                )
-            # Absolute Rule 1 safety guard: NEVER overwrite source file
-            if dst_path == src_path:
-                raise ValueError(
-                    f"Refusing to overwrite original source audio file: {src_path}"
-                )
+            dst_path = _safe_output_dst(output_dir, rel_candidate, src_path)
             if is_wav_transcode:
                 transcode_jobs.append((src_path, dst_path))
             else:
                 copy_jobs.append((src_path, dst_path))
 
-    # Execute copies
-    for src, dst in copy_jobs:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        copied_files.append(dst)
+    if swap_lr and (copy_jobs or transcode_jobs):
+        try:
+            ffmpeg_exe = find_ffmpeg(ffmpeg_path)
+        except FfmpegNotFoundError:
+            if transcode_jobs:
+                raise
+            warnings.append(
+                ConversionWarning(
+                    code="SWAP_LR_NO_FFMPEG",
+                    message="ffmpeg not found; retained slices copied without L/R channel swap.",
+                )
+            )
+            ffmpeg_exe = None
+
+    # Execute copies (or L/R swap on stereo copies)
+    if copy_jobs:
+        if swap_lr and ffmpeg_exe:
+            max_workers = min(8, os.cpu_count() or 4, len(copy_jobs))
+
+            def _copy_or_swap_one(pair: Tuple[Path, Path]) -> Tuple[Path, Optional[str]]:
+                src, dst = pair
+                err = _copy_or_swap_lr_audio(
+                    src,
+                    dst,
+                    swap_lr=True,
+                    ffmpeg_exe=ffmpeg_exe,
+                    ogg_quality=ogg_quality,
+                )
+                return dst, err
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for dst, err in executor.map(_copy_or_swap_one, copy_jobs):
+                    copied_files.append(dst)
+                    if err is not None:
+                        warnings.append(
+                            ConversionWarning(
+                                code="SWAP_LR_SLICE_FALLBACK",
+                                message=f"Copied {dst.name} without L/R swap ({err}).",
+                            )
+                        )
+        else:
+            for src, dst in copy_jobs:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied_files.append(dst)
 
     # Execute .wav -> .ogg transcodes in parallel
     if transcode_jobs:
-        ffmpeg_exe = find_ffmpeg(ffmpeg_path)
+        if ffmpeg_exe is None:
+            ffmpeg_exe = find_ffmpeg(ffmpeg_path)
         max_workers = min(8, os.cpu_count() or 4, len(transcode_jobs))
 
         def _transcode_one(pair: Tuple[Path, Path]) -> Tuple[Path, Optional[str]]:
@@ -573,12 +760,16 @@ def materialize_retained_slices(
                 "-y",
                 "-i",
                 str(src),
+            ]
+            if swap_lr and _get_audio_channels(src, ffmpeg_exe) != 1:
+                cmd.extend(["-af", "pan=stereo|c0=c1|c1=c0"])
+            cmd.extend([
                 "-c:a",
                 "libvorbis",
                 "-q:a",
                 f"{ogg_quality:g}",
                 str(dst),
-            ]
+            ])
             proc = subprocess.run(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -617,8 +808,11 @@ def materialize_preview_audio(
     *,
     copy_files: bool = True,
     reserve_bgm_ogg: bool = True,
+    swap_lr: bool = False,
+    ffmpeg_path: Optional[str] = None,
+    ogg_quality: float = 6.0,
 ) -> Tuple[Optional[str], Optional[Path]]:
-    """Sanitize and plain-copy #PREVIEW audio into output_dir without colliding with slices or bgm.ogg.
+    """Copy (or L/R swap) #PREVIEW audio into output_dir without colliding with slices or bgm.ogg.
 
     Returns (dtx_relative_preview_filename_with_backslashes, copied_dst_path_or_None).
     """
@@ -627,59 +821,307 @@ def materialize_preview_audio(
         return None, None
 
     src_path = entry.resolved_path.resolve()
-    rel_candidate = Path(entry.resolved_name.replace("\\", "/"))
-    if (
-        rel_candidate.is_absolute()
-        or bool(rel_candidate.drive)
-        or bool(rel_candidate.root)
-        or ".." in rel_candidate.parts
-        or str(rel_candidate) in ("", ".")
-    ):
-        rel_candidate = Path(src_path.name)
-
-    sanitized_parts = [part.replace(";", "_") for part in rel_candidate.parts]
-    rel_candidate = (
-        Path(*sanitized_parts)
-        if sanitized_parts
-        else Path(src_path.name.replace(";", "_"))
-    )
-
-    claimed_lower: set[str] = {name.replace("\\", "/").lower() for name in claimed_rel_names}
+    claimed_lower: Dict[str, Optional[Path]] = {
+        name.replace("\\", "/").lower(): None for name in claimed_rel_names
+    }
     if reserve_bgm_ogg:
-        claimed_lower.add("bgm.ogg")
+        claimed_lower["bgm.ogg"] = None
 
+    rel_candidate = _sanitize_rel_candidate(entry.resolved_name, src_path)
+    rel_candidate = _disambiguate_rel(
+        rel_candidate, None, claimed_lower, allow_reuse_same_src=False
+    )
     rel_str = rel_candidate.as_posix()
-    if rel_str.lower() in claimed_lower:
-        stem = rel_candidate.stem
-        suffix = rel_candidate.suffix
-        parent = rel_candidate.parent
-        counter = 1
-        while True:
-            alt = (
-                (parent / f"{stem}_{counter}{suffix}")
-                if str(parent) not in ("", ".")
-                else Path(f"{stem}_{counter}{suffix}")
-            )
-            if alt.as_posix().lower() not in claimed_lower:
-                rel_candidate = alt
-                rel_str = alt.as_posix()
-                break
-            counter += 1
 
     dtx_rel = rel_str.replace("/", "\\")
     dst_path: Optional[Path] = None
     if copy_files:
-        resolved_out_root = output_dir.resolve()
-        dst_path = (resolved_out_root / rel_candidate).resolve()
-        if not dst_path.is_relative_to(resolved_out_root):
-            raise ValueError(
-                f"Refusing to write #PREVIEW outside output directory: {dst_path}"
-            )
-        if dst_path == src_path:
-            raise ValueError(
-                f"Refusing to overwrite original source preview file: {src_path}"
-            )
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_path, dst_path)
+        dst_path = _safe_output_dst(output_dir, rel_candidate, src_path)
+        ffmpeg_exe: Optional[str] = None
+        if swap_lr:
+            try:
+                ffmpeg_exe = find_ffmpeg(ffmpeg_path)
+            except FfmpegNotFoundError:
+                ffmpeg_exe = None
+        _copy_or_swap_lr_audio(
+            src_path,
+            dst_path,
+            swap_lr=swap_lr,
+            ffmpeg_exe=ffmpeg_exe,
+            ogg_quality=ogg_quality,
+        )
 
     return dtx_rel, dst_path
+
+
+def _resize_image_ffmpeg(
+    src: Path, dst: Path, width: int, height: int, ffmpeg_exe: str
+) -> Optional[str]:
+    """Scale image preserving aspect ratio and pad with black bars to exact width x height."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+    )
+    cmd = [
+        ffmpeg_exe,
+        "-v",
+        "error",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(src),
+        "-vf",
+        vf,
+        "-frames:v",
+        "1",
+    ]
+    if dst.suffix.lower() in (".jpg", ".jpeg"):
+        cmd.extend(["-q:v", "2"])
+    cmd.append(str(dst))
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        creationflags=_CREATE_NO_WINDOW,
+        check=False,
+    )
+    if proc.returncode != 0 or not dst.is_file():
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        return err or f"ffmpeg exit code {proc.returncode}"
+    return None
+
+
+def materialize_images(
+    chart: BmsChart,
+    output_dir: Path,
+    claimed_rel_names: Sequence[str],
+    *,
+    image_mode: str = IMAGE_MODE_KEEP,
+    copy_files: bool = True,
+    reserve_bgm_ogg: bool = True,
+    ffmpeg_path: Optional[str] = None,
+) -> Tuple[
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[Path],
+    Optional[Path],
+    Optional[Path],
+    List[ConversionWarning],
+]:
+    """Materialize #STAGEFILE -> #STAGEFILE/#PREIMAGE and #BACKBMP -> #BACKGROUND."""
+    mode = (image_mode or IMAGE_MODE_KEEP).strip().lower()
+    if mode == IMAGE_MODE_NONE:
+        return None, None, None, None, None, None, []
+
+    warnings: List[ConversionWarning] = []
+    claimed_lower: Dict[str, Optional[Path]] = {
+        name.replace("\\", "/").lower(): None for name in claimed_rel_names
+    }
+    if reserve_bgm_ogg:
+        claimed_lower["bgm.ogg"] = None
+
+    ffmpeg_exe: Optional[str] = None
+    if mode == IMAGE_MODE_RESIZE and copy_files:
+        try:
+            ffmpeg_exe = find_ffmpeg(ffmpeg_path)
+        except FfmpegNotFoundError:
+            warnings.append(
+                ConversionWarning(
+                    code="IMAGE_RESIZE_NO_FFMPEG",
+                    message="ffmpeg not found; copied original images without resizing.",
+                )
+            )
+            mode = IMAGE_MODE_KEEP
+
+    stage_rel: Optional[str] = None
+    pre_rel: Optional[str] = None
+    bg_rel: Optional[str] = None
+    stage_dst: Optional[Path] = None
+    pre_dst: Optional[Path] = None
+    bg_dst: Optional[Path] = None
+
+    def _copy_raw_image(entry, missing_code: str, label: str) -> Tuple[Optional[str], Optional[Path]]:
+        if entry is None:
+            return None, None
+        if not entry.exists or entry.resolved_path is None:
+            warnings.append(
+                ConversionWarning(
+                    code=missing_code,
+                    message=f"{label} image file {entry.declared_name!r} could not be found.",
+                )
+            )
+            return None, None
+        src_path = entry.resolved_path.resolve()
+        rel_cand = _disambiguate_rel(
+            _sanitize_rel_candidate(entry.resolved_name, src_path),
+            src_path,
+            claimed_lower,
+        )
+        rel_str = rel_cand.as_posix()
+        claimed_lower[rel_str.lower()] = src_path
+        dst_path: Optional[Path] = None
+        if copy_files:
+            dst_path = _safe_output_dst(output_dir, rel_cand, src_path)
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            if not dst_path.exists():
+                shutil.copy2(src_path, dst_path)
+        return rel_str.replace("/", "\\"), dst_path
+
+    if mode == IMAGE_MODE_KEEP:
+        stage_rel, stage_dst = _copy_raw_image(chart.stagefile, "MISSING_STAGEFILE", "#STAGEFILE")
+        if stage_rel is not None:
+            pre_rel = stage_rel
+            pre_dst = stage_dst
+        bg_rel, bg_dst = _copy_raw_image(chart.backbmp, "MISSING_BACKBMP", "#BACKBMP")
+        return stage_rel, pre_rel, bg_rel, stage_dst, pre_dst, bg_dst, warnings
+
+    # IMAGE_MODE_RESIZE: #STAGEFILE -> 640x480, #PREIMAGE -> 204x269, #BACKGROUND -> 640x480
+    def _resize_one(entry, missing_code: str, label: str, width: int, height: int, suffix_tag: str) -> Tuple[Optional[str], Optional[Path]]:
+        if entry is None:
+            return None, None
+        if not entry.exists or entry.resolved_path is None:
+            warnings.append(
+                ConversionWarning(
+                    code=missing_code,
+                    message=f"{label} image file {entry.declared_name!r} could not be found.",
+                )
+            )
+            return None, None
+        src_path = entry.resolved_path.resolve()
+        rel_cand = _sanitize_rel_candidate(entry.resolved_name, src_path)
+        if suffix_tag:
+            rel_cand = rel_cand.with_name(f"{rel_cand.stem}{suffix_tag}{rel_cand.suffix}")
+        rel_cand = _disambiguate_rel(
+            rel_cand, None, claimed_lower, allow_reuse_same_src=False
+        )
+        rel_str = rel_cand.as_posix()
+        claimed_lower[rel_str.lower()] = src_path
+        dst_path: Optional[Path] = None
+        if copy_files and ffmpeg_exe:
+            dst_path = _safe_output_dst(output_dir, rel_cand, src_path)
+            err = _resize_image_ffmpeg(src_path, dst_path, width, height, ffmpeg_exe)
+            if err is not None:
+                warnings.append(
+                    ConversionWarning(
+                        code="IMAGE_RESIZE_FAILED",
+                        message=f"Failed to resize {src_path.name} ({width}x{height}); copied original instead ({err}).",
+                    )
+                )
+                dst_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_path, dst_path)
+        return rel_str.replace("/", "\\"), dst_path
+
+    if chart.stagefile is not None:
+        stage_rel, stage_dst = _resize_one(chart.stagefile, "MISSING_STAGEFILE", "#STAGEFILE", 640, 480, "")
+        if chart.stagefile.exists and chart.stagefile.resolved_path is not None:
+            pre_rel, pre_dst = _resize_one(chart.stagefile, "MISSING_STAGEFILE", "#PREIMAGE", 204, 269, "_preimage")
+    bg_rel, bg_dst = _resize_one(chart.backbmp, "MISSING_BACKBMP", "#BACKBMP", 640, 480, "")
+    return stage_rel, pre_rel, bg_rel, stage_dst, pre_dst, bg_dst, warnings
+
+
+def materialize_bga(
+    chart: BmsChart,
+    output_dir: Path,
+    claimed_rel_names: Sequence[str],
+    *,
+    copy_files: bool = True,
+    reserve_bgm_ogg: bool = True,
+) -> Tuple[
+    List[Tuple[str, str, str]],
+    List[Tuple[int, Fraction, str, str]],
+    List[Path],
+    List[ConversionWarning],
+]:
+    """Materialize #BMPxx/#AVIxx media files and map BMS 04/07 events to DTX 04/07/54."""
+    warnings: List[ConversionWarning] = []
+    if not chart.bmps:
+        return [], [], [], warnings
+
+    claimed_lower: Dict[str, Optional[Path]] = {
+        name.replace("\\", "/").lower(): None for name in claimed_rel_names
+    }
+    if reserve_bgm_ogg:
+        claimed_lower["bgm.ogg"] = None
+
+    bga_headers: List[Tuple[str, str, str]] = []
+    id_map: Dict[str, Tuple[str, str]] = {}  # orig_bid -> (tag "BMP"|"AVI", dtx_bid)
+    src_to_rel_out: Dict[Path, str] = {}
+    copied_files: List[Path] = []
+    missing_used: List[str] = []
+
+    referenced_ids = {ev.bga_id for ev in chart.bga_events}
+
+    # Preserve declaration order, re-indexed sequentially to legal Base-36 01..ZZ
+    slot_num = 1
+    for orig_bid, entry in chart.bmps.items():
+        if slot_num > DTX_MAX_WAV_SLOTS:
+            warnings.append(
+                ConversionWarning(
+                    code="BGA_LIMIT_EXCEEDED",
+                    message=f"BMS BGA declarations exceed DTX Base-36 limit ({DTX_MAX_WAV_SLOTS}); truncated.",
+                )
+            )
+            break
+        dtx_bid = int_to_base36(slot_num)
+        slot_num += 1
+
+        ext = (
+            entry.resolved_path.suffix.lower()
+            if entry.resolved_path is not None
+            else Path(entry.resolved_name).suffix.lower()
+        )
+        tag = "AVI" if ext in SUPPORTED_VIDEO_EXTENSIONS else "BMP"
+
+        if not entry.exists or entry.resolved_path is None:
+            dtx_rel = entry.resolved_name.replace("/", "\\").replace(";", "_")
+            if orig_bid in referenced_ids:
+                missing_used.append(f"{orig_bid}:{entry.declared_name}")
+        else:
+            src_path = entry.resolved_path.resolve()
+            if src_path in src_to_rel_out:
+                dtx_rel = src_to_rel_out[src_path]
+            else:
+                rel_cand = _disambiguate_rel(
+                    _sanitize_rel_candidate(entry.resolved_name, src_path),
+                    src_path,
+                    claimed_lower,
+                )
+                rel_str = rel_cand.as_posix()
+                dtx_rel = rel_str.replace("/", "\\")
+                claimed_lower[rel_str.lower()] = src_path
+                src_to_rel_out[src_path] = dtx_rel
+                if copy_files:
+                    dst_path = _safe_output_dst(output_dir, rel_cand, src_path)
+                    dst_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_path, dst_path)
+                    copied_files.append(dst_path)
+
+        bga_headers.append((tag, dtx_bid, dtx_rel))
+        id_map[orig_bid] = (tag, dtx_bid)
+
+    if missing_used:
+        sample = ", ".join(missing_used[:6])
+        more = f" (+{len(missing_used) - 6} more)" if len(missing_used) > 6 else ""
+        warnings.append(
+            ConversionWarning(
+                code="MISSING_BGA_FILES",
+                message=f"{len(missing_used)} BGA file(s) could not be found ({sample}{more}).",
+            )
+        )
+
+    bga_placed_events: List[Tuple[int, Fraction, str, str]] = []
+    for ev in chart.bga_events:
+        mapped = id_map.get(ev.bga_id)
+        if mapped is None:
+            continue
+        tag, dtx_bid = mapped
+        dtx_ch = "54" if tag == "AVI" else ev.channel
+        bga_placed_events.append((ev.measure, ev.pos, dtx_ch, dtx_bid))
+
+    return bga_headers, bga_placed_events, copied_files, warnings

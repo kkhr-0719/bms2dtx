@@ -77,7 +77,12 @@ class TestMappingAndRenumbering(unittest.TestCase):
             TabId.BD: orig_ids[7],
             TabId.CY: orig_ids[10],  # RD unset -> 09 <CY> 00
         }
-        cfg = MappingConfig(tab_wavs=tab_wavs, default_lane_binds=binds, toggle_on=False)
+        cfg = MappingConfig(
+            tab_wavs=tab_wavs,
+            default_lane_binds=binds,
+            toggle_on=False,
+            separate_lbd=True,
+        )
         plan = build_mapping_plan(chart, cfg)
 
         # Toggle=OFF reserves 01 for bgm.ogg, so 15 mapped slices get 02..0G in exact TAB_ORDER!
@@ -544,6 +549,95 @@ class TestSeAllocatorSlicerCollapseAndOverflow(unittest.TestCase):
                 self.assertNotIn(rerouted[key], SLICER_SE_CHANNELS)
                 self.assertIn(rerouted[key], ALL_SE_CHANNELS)
                 self.assertNotIn(rerouted[key], ("71", "72"))  # Guitar active -> SE11-12 excluded
+
+    def test_residual_lbd_folded_into_bd_when_lbd_hidden_and_no_1c_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for fn in ("bd.wav", "lbd.wav"):
+                (root / fn).write_bytes(b"dummy")
+            bms = root / "lbd_fold.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE LbdFold",
+                        "#BPM 120",
+                        "#WAV01 bd.wav",
+                        "#WAV02 lbd.wav",
+                        "#00101:0102",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+            plan = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={TabId.BD: ["01"], TabId.LBD: ["02"]},
+                    default_lane_binds={TabId.LBD: "02"},
+                    toggle_on=False,
+                    separate_lbd=False,
+                ),
+            )
+            self.assertEqual(plan.normalized_tab_wavs[TabId.LBD], [])
+            self.assertEqual(plan.normalized_tab_wavs[TabId.BD], ["01", "02"])
+            self.assertTrue(all(n.channel == "13" for n in plan.tab_placed_notes))
+            self.assertFalse(any(n.channel == "1C" for n in plan.tab_placed_notes))
+            # Folded bind applies to BD ("06") and syncs to lane 03 sub-slot
+            self.assertEqual(
+                plan.lane_bind_lines,
+                [
+                    "#DTXC_LANEBINDEDCHIP: 03 00 03",
+                    "#DTXC_LANEBINDEDCHIP: 06 03 00",
+                ],
+            )
+
+    def test_auto_bind_most_frequent_with_tie_break_and_missing_files_not_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for fn in ("sn_rare.wav", "sn_main.wav", "bd_tie1.wav", "bd_tie2.wav"):
+                (root / fn).write_bytes(b"dummy")
+            bms = root / "autobind.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE AutoBind",
+                        "#BPM 120",
+                        "#WAV01 sn_rare.wav",
+                        "#WAV02 sn_main.wav",
+                        "#WAV03 bd_tie1.wav",
+                        "#WAV04 bd_tie2.wav",
+                        "#WAV05 missing_a.wav",
+                        "#WAV06 missing_b.wav",
+                        "#00101:01020202",  # sn_rare x1, sn_main x3
+                        "#00201:0304",      # tie1 x1, tie2 x1 -> tie broken by list order ("03")
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+            plan = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={
+                        TabId.SD: ["01", "02"],
+                        TabId.BD: ["03", "04"],
+                        TabId.OTHER: ["05", "06"],
+                    },
+                    toggle_on=False,
+                    separate_lbd=False,
+                    default_bind_mode="auto",
+                ),
+            )
+            # 05 & 06 are both missing -> NEVER merged into 1 DTX slot!
+            self.assertNotEqual(plan.wav_id_map["05"], plan.wav_id_map["06"])
+            sd_bind = plan.wav_id_map["02"]  # highest frequency sn_main
+            bd_bind = plan.wav_id_map["03"]  # tie broken by order
+            self.assertIn(f"#DTXC_LANEBINDEDCHIP: 03 00 {bd_bind}", plan.lane_bind_lines)
+            self.assertIn(f"#DTXC_LANEBINDEDCHIP: 04 {sd_bind} 00", plan.lane_bind_lines)
+            self.assertIn(f"#DTXC_LANEBINDEDCHIP: 06 {bd_bind} 00", plan.lane_bind_lines)
+            self.assertEqual(plan.dtx_wav_labels["01"], "BGM")
+            self.assertEqual(plan.dtx_wav_labels[sd_bind], "SD")
+            self.assertEqual(plan.dtx_wav_labels[bd_bind], "BD")
 
 
 if __name__ == "__main__":

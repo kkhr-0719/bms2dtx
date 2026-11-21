@@ -2,11 +2,15 @@
 
 from .constants import (
     ALL_SE_CHANNELS,
+    DEFAULT_WAV_LABELS,
     DRUM_DTX_CHANNELS,
     DRUM_TABS,
     DTX_MAX_MAPPED_SLOTS_TOGGLE_OFF,
     DTX_MAX_WAV_SLOTS,
     DTXC_BIND_LANES,
+    IMAGE_MODE_KEEP,
+    IMAGE_MODE_NONE,
+    IMAGE_MODE_RESIZE,
     LEGAL_DTX_NOTE_CHANNELS,
     MAX_SLICER_COLUMNS,
     SLICER_SE_CHANNELS,
@@ -14,22 +18,32 @@ from .constants import (
     TAB_SPEC_MAP,
     TAB_SPECS,
     TabId,
+    WAV_LABEL_KEYS,
     base36_to_int,
     base62_to_int,
     int_to_base36,
+    sanitize_wav_label,
 )
 from .converter import batch_convert, convert_bms, inspect_bms
 from .dtx_writer import generate_dtx_text, write_dtx_file
 from .encoding import decode_bms_bytes, encode_dtx_text, read_bms_text
-from .mapping import MappingPlan, WavLimitExceededError, build_mapping_plan
+from .mapping import (
+    MappingPlan,
+    WavLimitExceededError,
+    build_mapping_plan,
+    resolve_auto_bind_wav_id,
+)
 from .mixer import (
     FfmpegNotFoundError,
     find_ffmpeg,
+    materialize_bga,
+    materialize_images,
     materialize_preview_audio,
     materialize_retained_slices,
     render_bgm_ogg,
 )
 from .models import (
+    BgaEvent,
     BmsChart,
     BpmChange,
     ConversionOptions,
@@ -53,17 +67,22 @@ from .timeline import Timeline, build_timeline_for_chart
 
 __all__ = [
     "ALL_SE_CHANNELS",
+    "BgaEvent",
     "BmsChart",
     "BpmChange",
     "ConversionOptions",
     "ConversionResult",
     "ConversionWarning",
+    "DEFAULT_WAV_LABELS",
     "DRUM_DTX_CHANNELS",
     "DRUM_TABS",
     "DTX_MAX_MAPPED_SLOTS_TOGGLE_OFF",
     "DTX_MAX_WAV_SLOTS",
     "DTXC_BIND_LANES",
     "FfmpegNotFoundError",
+    "IMAGE_MODE_KEEP",
+    "IMAGE_MODE_NONE",
+    "IMAGE_MODE_RESIZE",
     "LEGAL_DTX_NOTE_CHANNELS",
     "MAX_SLICER_COLUMNS",
     "MappingConfig",
@@ -80,6 +99,7 @@ __all__ = [
     "TabId",
     "Timeline",
     "TrackSummary",
+    "WAV_LABEL_KEYS",
     "WavEntry",
     "WavLimitExceededError",
     "allocate_se_channels",
@@ -96,10 +116,14 @@ __all__ = [
     "get_collapse_pools",
     "inspect_bms",
     "int_to_base36",
+    "materialize_bga",
+    "materialize_images",
     "materialize_preview_audio",
     "materialize_retained_slices",
     "parse_bms",
     "read_bms_text",
     "render_bgm_ogg",
+    "resolve_auto_bind_wav_id",
+    "sanitize_wav_label",
     "write_dtx_file",
 ]

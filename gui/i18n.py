@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from core.constants import DEFAULT_WAV_LABELS, WAV_LABEL_KEYS, sanitize_wav_label
+
 SUPPORTED_LANGUAGES: Tuple[Tuple[str, str], ...] = (
     ("zh_CN", "简体中文"),
     ("en", "English"),
@@ -23,9 +25,11 @@ _current_language: str = DEFAULT_LANGUAGE
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "zh_CN": {
         "open_bms_btn": "选择 .bms / .bme 文件",
-        "no_chart_selected": "（尚未选择谱面；也可用命令行参数传入文件）",
+        "no_chart_selected": "点击选择或拖入 .bms / .bme 文件",
+        "config_btn": "⚙ 設定 / Config",
+        "ffmpeg_warn_badge": "⚠ ffmpeg 未就绪",
         "ffmpeg_ok": "ffmpeg: {path}",
-        "ffmpeg_missing_short": "ffmpeg: 未找到（已禁用 bgm.ogg 混音 / .ogg 转码 / 非 WAV 试听）",
+        "ffmpeg_missing_short": "ffmpeg: 未找到（已禁用 bgm.ogg 混音 / .ogg 转码 / 非 WAV 试听 / 图片缩放）",
         "pick_ffmpeg_btn": "指定 ffmpeg.exe...",
         "lang_label": "语言:",
         "filetypes_bms": "BMS / BME 谱面",
@@ -38,6 +42,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "health_bpm": "BPM",
         "health_encoding": "编码",
         "health_radix": "进制",
+        "radix_base36_ok": "Base-36 兼容",
+        "radix_base62_ext": "Base-62 (扩展)",
         "health_wav_count": "WAV 数量",
         "health_wav_value": "共 {total} / 后缀已内存修正 {corrected} / 缺失 {missing}",
         "health_bgm_cols": "BGM 列",
@@ -47,12 +53,19 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "radix_warn_base62": "  ⚠ 检测到 62 进制，超出 DTX 原生 36 进制上限",
         "radix_warn_limit": "  ⚠ 切片总数 > 1295（v1 固定 Toggle = OFF 离线混音 bgm.ogg）",
         "left_frame_title": "源 #WAV 列表（Shift/Ctrl 多选；单击 / 方向键 / 空格 试听）",
+        "col_id": "ID",
+        "col_filename": "文件名",
+        "col_count": "次数",
+        "col_target": "目标轨",
         "search_label": "搜索:",
         "clear_search_btn": "清除",
         "only_used_chk": "仅显示被谱面使用的切片",
+        "play_btn": "▶ 试听",
         "stop_btn": "■ 停止",
-        "auto_preview_chk": "单击 / 方向键自动试听",
-        "left_count_summary": "显示 {shown} / {total}  已分配 {assigned}",
+        "auto_preview_chk": "自动试听",
+        "auto_preview_tooltip": "勾选后，单击左/右列表项或按方向键上下移动时会自动试听单个切片",
+        "swap_lr_chk": "左右声道互换",
+        "left_count_summary": "显示 {shown} / {total} · 已分配 {assigned}",
         "tag_missing": "[缺失]",
         "tag_undeclared": "(未声明)",
         "add_btn": "➜ 加入",
@@ -63,6 +76,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "separate_lbd_chk": "单独定义 LBD",
         "default_bind_label": "默认绑定 WAV (#DTXC_LANEBINDEDCHIP):",
         "no_bind_label": "(未指定 / 00)",
+        "auto_bind_prefix": "[自动最高频] ",
+        "status_bind_auto_label": "自动最高频",
         "tab_note_other": "固定分配至 SE6 (通道 66)",
         "tab_note_guitar": "可选：留空即禁用并自动释放 SE11–SE12",
         "tab_note_bass": "可选：留空即禁用并自动释放 SE13–SE14",
@@ -76,7 +91,29 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "utf8_chk": "导出 UTF-8 编码 (--utf8)",
         "transcode_ogg_chk": "将保留的 .wav 切片自动转码为 .ogg",
         "dlevel_label": "鼓难度 (#DLEVEL):",
+        "image_mode_label": "图片处理:",
+        "image_mode_keep": "保持原图直接搬运",
+        "image_mode_resize": "适配老版 DTX 尺寸（等比缩放 + 补黑边）",
+        "image_mode_none": "不搬运图片",
+        "export_bga_chk": "实验性 BGA 透传",
+        "settings_title": "設定 / Settings",
+        "settings_general_section": "界面语言",
+        "settings_ffmpeg_section": "ffmpeg 状态与路径",
+        "settings_ffmpeg_redetect_btn": "自动重新检测",
+        "settings_ffmpeg_hint": "获取指引：请将 ffmpeg.exe 放在程序同级目录或 bin\\ 子目录，或在 PowerShell 运行：",
+        "settings_winget_cmd": "winget install Gyan.FFmpeg.Essentials",
+        "settings_copy_cmd_btn": "复制命令",
+        "settings_copied_cmd": "已复制 winget 命令",
+        "settings_bind_section": "默认绑定芯片策略 (#DTXC_LANEBINDEDCHIP)",
+        "settings_bind_auto": "自动选择最高频切片",
+        "settings_bind_manual": "不自动绑定（手动指定）",
+        "settings_labels_section": "#WAVxx 导出行尾 ;LABEL 注释",
+        "settings_reset_labels_btn": "恢复默认",
+        "settings_save_btn": "保存并关闭",
+        "settings_cancel_btn": "取消",
         "status_ready": "就绪",
+        "status_undone": "已撤销上一步映射操作",
+        "status_redone": "已重做映射操作",
         "status_bind_updated": "{tab} 默认绑定: {wav}",
         "status_select_left_first": "请先在左侧列表选择要加入的切片",
         "status_added_to_tab": "已加入 {added} 个切片到 {tab}",
@@ -102,13 +139,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_ffmpeg_missing_body": (
             "未在程序目录 / bin 子目录 / 系统 PATH 中找到 ffmpeg.exe。\n\n"
             "在指定有效的 ffmpeg.exe 之前，以下功能被禁用：\n"
-            "  • 离线混音导出 bgm.ogg\n  • .wav → .ogg 转码\n  • 非 .wav 切片试听\n\n"
-            "请点击右上角“指定 ffmpeg.exe...”，或将 ffmpeg.exe 放在 bms2dtx.exe 旁边 / bin 文件夹。"
+            "  • 离线混音导出 bgm.ogg\n  • .wav → .ogg 转码\n  • 非 .wav 切片试听 / 左右声道互换\n\n"
+            "请点击右上角“⚙ 設定 / Config”指定 ffmpeg.exe，或将其放在 bms2dtx.exe 旁边 / bin 文件夹。"
         ),
         "dialog_ffmpeg_invalid_title": "ffmpeg 无效",
         "dialog_ffmpeg_invalid_body": "所选文件不是可用的 ffmpeg:\n{exc}",
         "dialog_file_not_found_title": "文件不存在",
         "dialog_file_not_found_body": "找不到文件:\n{path}",
+        "dialog_drop_invalid_title": "不支持的文件类型",
+        "dialog_drop_invalid_body": "请拖入 .bms / .bme / .bml 谱面文件:\n{name}",
         "dialog_radix_title": "进制提示",
         "dialog_radix_body": (
             "检测到 Base-62 谱面或切片总数超过 DTX 36 进制上限 (1295)。\n\n"
@@ -117,6 +156,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "dialog_clear_title": "清空分配",
         "dialog_clear_body": "确定清空全部 Tab 的分配？",
+        "dialog_dirty_close_title": "未导出的映射修改",
+        "dialog_dirty_close_body": "当前谱面有尚未导出的轨道映射修改，确定直接关闭程序吗？",
         "dialog_guess_none_body": "没有根据文件名识别出的未分配切片。",
         "dialog_guess_confirm_body": (
             "当前已有 {assigned} 个手动分配。\n\n"
@@ -134,7 +175,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_dlevel_err_body": "#DLEVEL 必须为非负整数（或留空）。",
         "dialog_export_no_ffmpeg_body": (
             "未找到 ffmpeg：将无法离线混音 bgm.ogg，导出的 .dtx 会引用不存在的 bgm.ogg。\n\n"
-            "仍要只导出 .dtx 与保留的切片吗？（选“否”可先去指定 ffmpeg.exe）"
+            "仍要只导出 .dtx 与保留的切片吗？（选“否”可先前往设置指定 ffmpeg.exe）"
         ),
         "dialog_export_done_title": "导出完成",
         "dialog_open_folder_err_title": "打开文件夹失败",
@@ -156,7 +197,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "result_warnings_header": "警告 ({count}):",
         "preview_no_winsound": "当前系统不支持试听 (winsound 不可用)",
         "preview_file_missing": "文件不存在，无法试听: {name}",
-        "preview_no_ffmpeg": "未找到 ffmpeg: 无法试听非 .wav 切片 (请指定 ffmpeg.exe)",
+        "preview_no_ffmpeg": "未找到 ffmpeg: 无法试听非 .wav 切片或启用声道互换 (请指定 ffmpeg.exe)",
         "preview_decoding": "解码中: {name} ...",
         "preview_stopped": "已停止",
         "preview_decode_failed": "解码失败: {exc}",
@@ -171,7 +212,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     },
     "en": {
         "open_bms_btn": "Open .bms / .bme File",
-        "no_chart_selected": "(No chart selected; you can also pass a file via CLI)",
+        "no_chart_selected": "Click to choose or drag & drop a .bms / .bme file",
+        "config_btn": "⚙ 設定 / Config",
+        "ffmpeg_warn_badge": "⚠ ffmpeg missing",
         "ffmpeg_ok": "ffmpeg: {path}",
         "ffmpeg_missing_short": "ffmpeg: Not found (bgm.ogg mix / .ogg transcode / non-WAV preview disabled)",
         "pick_ffmpeg_btn": "Locate ffmpeg.exe...",
@@ -186,6 +229,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "health_bpm": "BPM",
         "health_encoding": "Encoding",
         "health_radix": "Radix",
+        "radix_base36_ok": "Base-36 (Standard)",
+        "radix_base62_ext": "Base-62 (Extended)",
         "health_wav_count": "WAV Count",
         "health_wav_value": "Total {total} / Suffix auto-fixed {corrected} / Missing {missing}",
         "health_bgm_cols": "BGM Columns",
@@ -195,12 +240,19 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "radix_warn_base62": "  ⚠ Base-62 detected, exceeds native DTX Base-36 limit",
         "radix_warn_limit": "  ⚠ Total slices > 1295 (Toggle = OFF offline bgm.ogg mix locked)",
         "left_frame_title": "Source #WAV List (Shift/Ctrl multi-select; Click / Arrows / Space to preview)",
+        "col_id": "ID",
+        "col_filename": "Filename",
+        "col_count": "Count",
+        "col_target": "Target",
         "search_label": "Search:",
         "clear_search_btn": "Clear",
         "only_used_chk": "Show only slices used in chart",
+        "play_btn": "▶ Play",
         "stop_btn": "■ Stop",
-        "auto_preview_chk": "Auto-preview on click / arrow keys",
-        "left_count_summary": "Showing {shown} / {total}  Assigned {assigned}",
+        "auto_preview_chk": "Auto-preview",
+        "auto_preview_tooltip": "When checked, clicking or moving with Up/Down arrow keys in either list auto-previews the slice",
+        "swap_lr_chk": "Swap L/R",
+        "left_count_summary": "Showing {shown} / {total} · Assigned {assigned}",
         "tag_missing": "[Missing]",
         "tag_undeclared": "(Undeclared)",
         "add_btn": "➜ Add",
@@ -211,6 +263,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "separate_lbd_chk": "Separate LBD",
         "default_bind_label": "Default Bound WAV (#DTXC_LANEBINDEDCHIP):",
         "no_bind_label": "(None / 00)",
+        "auto_bind_prefix": "[Auto Most-Used] ",
+        "status_bind_auto_label": "Auto (most-used)",
         "tab_note_other": "Fixed to SE6 (Channel 66)",
         "tab_note_guitar": "Optional: leave empty to disable and release SE11–SE12",
         "tab_note_bass": "Optional: leave empty to disable and release SE13–SE14",
@@ -224,7 +278,29 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "utf8_chk": "Export UTF-8 encoding (--utf8)",
         "transcode_ogg_chk": "Transcode retained .wav slices to .ogg",
         "dlevel_label": "Drums Level (#DLEVEL):",
+        "image_mode_label": "Images:",
+        "image_mode_keep": "Keep original images",
+        "image_mode_resize": "Resize for legacy DTX (pad to 204×269 / 640×480)",
+        "image_mode_none": "Do not copy images",
+        "export_bga_chk": "Experimental BGA passthrough",
+        "settings_title": "Settings / 設定",
+        "settings_general_section": "Language",
+        "settings_ffmpeg_section": "ffmpeg Status & Path",
+        "settings_ffmpeg_redetect_btn": "Re-detect",
+        "settings_ffmpeg_hint": "How to get ffmpeg: place ffmpeg.exe beside the app or in bin\\, or run in PowerShell:",
+        "settings_winget_cmd": "winget install Gyan.FFmpeg.Essentials",
+        "settings_copy_cmd_btn": "Copy",
+        "settings_copied_cmd": "winget command copied",
+        "settings_bind_section": "Default Bound Chip Strategy (#DTXC_LANEBINDEDCHIP)",
+        "settings_bind_auto": "Auto-select most frequent slice",
+        "settings_bind_manual": "Do not auto-bind (manual)",
+        "settings_labels_section": "#WAVxx Export Inline ;LABEL Comments",
+        "settings_reset_labels_btn": "Reset Defaults",
+        "settings_save_btn": "Save & Close",
+        "settings_cancel_btn": "Cancel",
         "status_ready": "Ready",
+        "status_undone": "Undone last mapping change",
+        "status_redone": "Redone mapping change",
         "status_bind_updated": "{tab} default bind: {wav}",
         "status_select_left_first": "Please select slice(s) in the left list first",
         "status_added_to_tab": "Added {added} slice(s) to {tab}",
@@ -250,13 +326,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_ffmpeg_missing_body": (
             "ffmpeg.exe was not found in the app folder, bin/ subfolder, or system PATH.\n\n"
             "Until a valid ffmpeg.exe is specified, the following features are disabled:\n"
-            "  • Offline bgm.ogg mixing\n  • .wav → .ogg transcoding\n  • Non-.wav slice preview\n\n"
-            "Click 'Locate ffmpeg.exe...' at the top right, or place ffmpeg.exe beside bms2dtx.exe / in bin/."
+            "  • Offline bgm.ogg mixing\n  • .wav → .ogg transcoding\n  • Non-.wav slice preview / L-R channel swap\n\n"
+            "Click '⚙ 設定 / Config' at the top right to locate ffmpeg.exe, or place it beside bms2dtx.exe / in bin/."
         ),
         "dialog_ffmpeg_invalid_title": "Invalid ffmpeg",
         "dialog_ffmpeg_invalid_body": "Selected file is not a valid ffmpeg executable:\n{exc}",
         "dialog_file_not_found_title": "File Not Found",
         "dialog_file_not_found_body": "Could not find file:\n{path}",
+        "dialog_drop_invalid_title": "Unsupported File",
+        "dialog_drop_invalid_body": "Please drop a .bms / .bme / .bml chart file:\n{name}",
         "dialog_radix_title": "Radix Notice",
         "dialog_radix_body": (
             "Detected a Base-62 chart or total slices exceeding the DTX Base-36 limit (1295).\n\n"
@@ -265,6 +343,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "dialog_clear_title": "Clear All",
         "dialog_clear_body": "Clear all Tab assignments?",
+        "dialog_dirty_close_title": "Unsaved Mapping Changes",
+        "dialog_dirty_close_body": "You have unexported mapping changes. Are you sure you want to exit?",
         "dialog_guess_none_body": "No unassigned slices could be guessed from filenames.",
         "dialog_guess_confirm_body": (
             "There are currently {assigned} manual assignment(s).\n\n"
@@ -282,7 +362,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_dlevel_err_body": "#DLEVEL must be a non-negative integer (or empty).",
         "dialog_export_no_ffmpeg_body": (
             "ffmpeg not found: bgm.ogg cannot be rendered, and the exported .dtx will reference a non-existent bgm.ogg.\n\n"
-            "Export .dtx and retained slices anyway? (Choose 'No' to locate ffmpeg.exe first)"
+            "Export .dtx and retained slices anyway? (Choose 'No' to configure ffmpeg.exe first)"
         ),
         "dialog_export_done_title": "Export Complete",
         "dialog_open_folder_err_title": "Failed to Open Folder",
@@ -304,7 +384,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "result_warnings_header": "Warnings ({count}):",
         "preview_no_winsound": "Audio preview not supported on this OS (winsound unavailable)",
         "preview_file_missing": "File not found, cannot preview: {name}",
-        "preview_no_ffmpeg": "ffmpeg not found: cannot preview non-.wav slices (please locate ffmpeg.exe)",
+        "preview_no_ffmpeg": "ffmpeg not found: cannot preview non-.wav slices or swap L/R (please locate ffmpeg.exe)",
         "preview_decoding": "Decoding: {name} ...",
         "preview_stopped": "Stopped",
         "preview_decode_failed": "Decode failed: {exc}",
@@ -319,7 +399,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     },
     "ja": {
         "open_bms_btn": ".bms / .bme ファイルを選択",
-        "no_chart_selected": "（譜面未選択・コマンドライン引数での指定も可能）",
+        "no_chart_selected": "クリックで選択、または .bms / .bme をドロップ",
+        "config_btn": "⚙ 設定 / Config",
+        "ffmpeg_warn_badge": "⚠ ffmpeg 未検出",
         "ffmpeg_ok": "ffmpeg: {path}",
         "ffmpeg_missing_short": "ffmpeg: 未検出（bgm.ogg ミックス / .ogg 変換 / 非WAV試聴は無効）",
         "pick_ffmpeg_btn": "ffmpeg.exe を指定...",
@@ -334,6 +416,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "health_bpm": "BPM",
         "health_encoding": "文字コード",
         "health_radix": "基数",
+        "radix_base36_ok": "Base-36 互換",
+        "radix_base62_ext": "Base-62 (拡張)",
         "health_wav_count": "WAV 数",
         "health_wav_value": "計 {total} / 拡張子メモリ補正 {corrected} / 欠損 {missing}",
         "health_bgm_cols": "BGM 列",
@@ -343,12 +427,19 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "radix_warn_base62": "  ⚠ 62進数を検出（DTX標準の36進数上限を超過）",
         "radix_warn_limit": "  ⚠ スライス総数 > 1295（Toggle = OFF で bgm.ogg にオフラインミックス）",
         "left_frame_title": "元 #WAV リスト（Shift/Ctrl 複数選択；クリック / 矢印 / Space で試聴）",
+        "col_id": "ID",
+        "col_filename": "ファイル名",
+        "col_count": "回数",
+        "col_target": "割当先",
         "search_label": "検索:",
         "clear_search_btn": "クリア",
         "only_used_chk": "譜面で使用されているスライスのみ表示",
+        "play_btn": "▶ 試聴",
         "stop_btn": "■ 停止",
-        "auto_preview_chk": "クリック / 矢印キーで自動試聴",
-        "left_count_summary": "表示 {shown} / {total}  割当済 {assigned}",
+        "auto_preview_chk": "自動試聴",
+        "auto_preview_tooltip": "有効にすると、左右リストのクリックまたは上下キー移動時に単一スライスを自動試聴します",
+        "swap_lr_chk": "左右チャンネル入替",
+        "left_count_summary": "表示 {shown} / {total} · 割当済 {assigned}",
         "tag_missing": "[欠損]",
         "tag_undeclared": "(未定義)",
         "add_btn": "➜ 追加",
@@ -359,6 +450,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "separate_lbd_chk": "LBD を個別定義",
         "default_bind_label": "デフォルトバインド WAV (#DTXC_LANEBINDEDCHIP):",
         "no_bind_label": "(未指定 / 00)",
+        "auto_bind_prefix": "[自動最多頻度] ",
+        "status_bind_auto_label": "自動最多頻度",
         "tab_note_other": "SE6 (チャンネル 66) に固定割当",
         "tab_note_guitar": "任意：空欄で無効化（SE11–SE12 を自動解放）",
         "tab_note_bass": "任意：空欄で無効化（SE13–SE14 を自動解放）",
@@ -372,7 +465,29 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "utf8_chk": "UTF-8 で出力 (--utf8)",
         "transcode_ogg_chk": "保持した .wav スライスを .ogg に自動変換",
         "dlevel_label": "ドラム難易度 (#DLEVEL):",
+        "image_mode_label": "画像処理:",
+        "image_mode_keep": "元画像をそのままコピー",
+        "image_mode_resize": "旧DTXサイズ変換（比率維持＋黒帯）",
+        "image_mode_none": "画像をコピーしない",
+        "export_bga_chk": "実験的 BGA パススルー",
+        "settings_title": "設定 / Settings",
+        "settings_general_section": "表示言語",
+        "settings_ffmpeg_section": "ffmpeg ステータスとパス",
+        "settings_ffmpeg_redetect_btn": "自動再検出",
+        "settings_ffmpeg_hint": "入手方法：ffmpeg.exe を本体と同階層または bin\\ に配置するか、PowerShell で実行：",
+        "settings_winget_cmd": "winget install Gyan.FFmpeg.Essentials",
+        "settings_copy_cmd_btn": "コピー",
+        "settings_copied_cmd": "winget コマンドをコピーしました",
+        "settings_bind_section": "デフォルトチップ割当方針 (#DTXC_LANEBINDEDCHIP)",
+        "settings_bind_auto": "最多頻度のスライスを自動選択",
+        "settings_bind_manual": "自動バインドしない（手動指定）",
+        "settings_labels_section": "#WAVxx エクスポート行末 ;LABEL コメント",
+        "settings_reset_labels_btn": "初期値に戻す",
+        "settings_save_btn": "保存して閉じる",
+        "settings_cancel_btn": "キャンセル",
         "status_ready": "準備完了",
+        "status_undone": "直前のマッピング操作を元に戻しました",
+        "status_redone": "マッピング操作をやり直しました",
         "status_bind_updated": "{tab} デフォルトバインド: {wav}",
         "status_select_left_first": "左リストから追加するスライスを選択してください",
         "status_added_to_tab": "{tab} に {added} 個のスライスを追加しました",
@@ -398,13 +513,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_ffmpeg_missing_body": (
             "アプリフォルダ / bin サブフォルダ / システム PATH に ffmpeg.exe が見つかりません。\n\n"
             "有効な ffmpeg.exe を指定するまで、以下の機能は無効になります：\n"
-            "  • bgm.ogg のオフラインミックス出力\n  • .wav → .ogg 自動変換\n  • 非 .wav スライスの試聴\n\n"
-            "右上の「ffmpeg.exe を指定...」をクリックするか、bms2dtx.exe の隣または bin フォルダに配置してください。"
+            "  • bgm.ogg のオフラインミックス出力\n  • .wav → .ogg 自動変換\n  • 非 .wav スライスの試聴 / 左右チャンネル入替\n\n"
+            "右上の「⚙ 設定 / Config」から ffmpeg.exe を指定するか、bms2dtx.exe の隣または bin フォルダに配置してください。"
         ),
         "dialog_ffmpeg_invalid_title": "無効な ffmpeg",
         "dialog_ffmpeg_invalid_body": "選択されたファイルは有効な ffmpeg ではありません:\n{exc}",
         "dialog_file_not_found_title": "ファイルが見つかりません",
         "dialog_file_not_found_body": "ファイルが見つかりません:\n{path}",
+        "dialog_drop_invalid_title": "未対応のファイル",
+        "dialog_drop_invalid_body": ".bms / .bme / .bml 譜面ファイルをドロップしてください:\n{name}",
         "dialog_radix_title": "基数に関する通知",
         "dialog_radix_body": (
             "Base-62 譜面、またはスライス総数が DTX 36進数上限 (1295) を超えています。\n\n"
@@ -413,6 +530,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         ),
         "dialog_clear_title": "すべてクリア",
         "dialog_clear_body": "すべての Tab の割当をクリアしますか？",
+        "dialog_dirty_close_title": "未エクスポートの変更",
+        "dialog_dirty_close_body": "現在のマッピング変更はまだエクスポートされていません。終了しますか？",
         "dialog_guess_none_body": "ファイル名から判別できる未割当スライスはありませんでした。",
         "dialog_guess_confirm_body": (
             "現在 {assigned} 個の手動割当があります。\n\n"
@@ -452,7 +571,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "result_warnings_header": "警告 ({count}):",
         "preview_no_winsound": "現在の環境では試聴がサポートされていません (winsound 利用不可)",
         "preview_file_missing": "ファイルが存在しないため試聴できません: {name}",
-        "preview_no_ffmpeg": "ffmpeg 未検出: 非 .wav スライスを試聴できません (ffmpeg.exe を指定してください)",
+        "preview_no_ffmpeg": "ffmpeg 未検出: 非 .wav スライスやチャンネル入替を試聴できません (ffmpeg.exe を指定してください)",
         "preview_decoding": "デコード中: {name} ...",
         "preview_stopped": "停止しました",
         "preview_decode_failed": "デコード失敗: {exc}",
@@ -503,8 +622,15 @@ def get_default_config_path() -> Path:
     return Path.home() / ".bms2dtx" / "settings.json"
 
 
-def load_language_preference(config_path: Optional[Path | str] = None) -> str:
-    """Load saved language code from disk; returns DEFAULT_LANGUAGE if not found or invalid."""
+def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any]:
+    """Load persisted v1.2 settings JSON, filling missing fields with safe defaults."""
+    settings: Dict[str, Any] = {
+        "language": DEFAULT_LANGUAGE,
+        "ffmpeg_path": None,
+        "default_bind_mode": "auto",
+        "swap_lr": False,
+        "wav_labels": dict(DEFAULT_WAV_LABELS),
+    }
     target = Path(config_path) if config_path is not None else get_default_config_path()
     try:
         if target.is_file():
@@ -512,16 +638,32 @@ def load_language_preference(config_path: Optional[Path | str] = None) -> str:
             if isinstance(data, dict):
                 lang = str(data.get("language", DEFAULT_LANGUAGE)).strip()
                 if lang in TRANSLATIONS:
-                    return lang
+                    settings["language"] = lang
+                raw_ff = data.get("ffmpeg_path")
+                if isinstance(raw_ff, str) and raw_ff.strip():
+                    settings["ffmpeg_path"] = raw_ff.strip()
+                bind_mode = str(data.get("default_bind_mode", "auto")).strip().lower()
+                if bind_mode in ("auto", "manual"):
+                    settings["default_bind_mode"] = bind_mode
+                if "swap_lr" in data:
+                    settings["swap_lr"] = bool(data.get("swap_lr"))
+                raw_labels = data.get("wav_labels")
+                if isinstance(raw_labels, dict):
+                    merged = dict(DEFAULT_WAV_LABELS)
+                    for key in WAV_LABEL_KEYS:
+                        if key in raw_labels and isinstance(raw_labels[key], str):
+                            merged[key] = sanitize_wav_label(raw_labels[key])
+                    settings["wav_labels"] = merged
     except Exception:
         pass
-    return DEFAULT_LANGUAGE
+    return settings
 
 
-def save_language_preference(lang: str, config_path: Optional[Path | str] = None) -> bool:
-    """Persist language preference to local settings JSON."""
+def save_app_settings(
+    updates: Dict[str, Any], config_path: Optional[Path | str] = None
+) -> bool:
+    """Merge and persist settings into local settings.json."""
     target = Path(config_path) if config_path is not None else get_default_config_path()
-    norm_lang = lang if lang in TRANSLATIONS else DEFAULT_LANGUAGE
     try:
         existing: Dict[str, Any] = {}
         if target.is_file():
@@ -531,9 +673,37 @@ def save_language_preference(lang: str, config_path: Optional[Path | str] = None
                     existing = loaded
             except Exception:
                 existing = {}
-        existing["language"] = norm_lang
+        for k, v in updates.items():
+            if k == "language":
+                norm = str(v).strip()
+                existing["language"] = norm if norm in TRANSLATIONS else DEFAULT_LANGUAGE
+            elif k == "default_bind_mode":
+                bm = str(v).strip().lower()
+                existing["default_bind_mode"] = bm if bm in ("auto", "manual") else "auto"
+            elif k == "wav_labels" and isinstance(v, dict):
+                cleaned_labels: Dict[str, str] = {}
+                for lk in WAV_LABEL_KEYS:
+                    raw_val = v.get(lk, DEFAULT_WAV_LABELS[lk])
+                    cleaned_labels[lk] = sanitize_wav_label(str(raw_val))
+                existing["wav_labels"] = cleaned_labels
+            elif k == "ffmpeg_path":
+                existing["ffmpeg_path"] = str(v).strip() if v else None
+            elif k == "swap_lr":
+                existing["swap_lr"] = bool(v)
+            else:
+                existing[k] = v
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
     except Exception:
         return False
+
+
+def load_language_preference(config_path: Optional[Path | str] = None) -> str:
+    """Load saved language code from disk; returns DEFAULT_LANGUAGE if not found or invalid."""
+    return str(load_app_settings(config_path).get("language", DEFAULT_LANGUAGE))
+
+
+def save_language_preference(lang: str, config_path: Optional[Path | str] = None) -> bool:
+    """Persist language preference to local settings JSON."""
+    return save_app_settings({"language": lang}, config_path)

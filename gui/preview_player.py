@@ -16,6 +16,7 @@ Design (see Phase 3 ruling):
 from __future__ import annotations
 
 import atexit
+import inspect
 import shutil
 import subprocess
 import sys
@@ -33,12 +34,15 @@ except ImportError:  # non-Windows
 
 StatusCallback = Callable[[str], None]
 FfmpegGetter = Callable[[], Optional[str]]
-Decoder = Callable[[str, Path, Path], None]
+SwapLrGetter = Callable[[], bool]
+Decoder = Callable[..., None]
 
 MAX_PREVIEW_SECONDS = 180
 
 
-def decode_with_ffmpeg(ffmpeg: str, src: Path, dst: Path) -> None:
+def decode_with_ffmpeg(
+    ffmpeg: str, src: Path, dst: Path, *, swap_lr: bool = False
+) -> None:
     """Decode ``src`` to 16-bit 44.1 kHz stereo PCM wav at ``dst`` (raises on failure)."""
     cmd = [
         ffmpeg,
@@ -50,6 +54,10 @@ def decode_with_ffmpeg(ffmpeg: str, src: Path, dst: Path) -> None:
         "-t",
         str(MAX_PREVIEW_SECONDS),
         "-vn",
+    ]
+    if swap_lr:
+        cmd.extend(["-af", "aformat=channel_layouts=stereo,pan=stereo|c0=c1|c1=c0"])
+    cmd.extend([
         "-acodec",
         "pcm_s16le",
         "-ar",
@@ -57,7 +65,7 @@ def decode_with_ffmpeg(ffmpeg: str, src: Path, dst: Path) -> None:
         "-ac",
         "2",
         str(dst),
-    ]
+    ])
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
     proc = subprocess.run(
         cmd,
@@ -83,11 +91,17 @@ class PreviewPlayer:
         winsound_module=_winsound,
         decoder: Optional[Decoder] = None,
         temp_root: Optional[Path] = None,
+        swap_lr_getter: Optional[SwapLrGetter] = None,
     ) -> None:
         self._ffmpeg_getter = ffmpeg_getter
         self._on_status = on_status or (lambda _msg: None)
         self._ws = winsound_module
         self._decoder = decoder or decode_with_ffmpeg
+        try:
+            self._decoder_accepts_swap_lr = "swap_lr" in inspect.signature(self._decoder).parameters
+        except (TypeError, ValueError):
+            self._decoder_accepts_swap_lr = False
+        self._swap_lr_getter = swap_lr_getter or (lambda: False)
         self._lock = threading.Lock()
         self._generation = 0
         self._slot = 0
@@ -149,8 +163,9 @@ class PreviewPlayer:
         self._purge()
 
         ffmpeg = self._ffmpeg_getter()
+        swap_lr = bool(self._swap_lr_getter())
         if not ffmpeg:
-            if src_path.suffix.lower() == ".wav":
+            if src_path.suffix.lower() == ".wav" and not swap_lr:
                 self._play_file(src_path, gen, direct=True)
                 return True
             self._status(tr("preview_no_ffmpeg"))
@@ -162,7 +177,7 @@ class PreviewPlayer:
         self._status(tr("preview_decoding", name=src_path.name))
         thread = threading.Thread(
             target=self._decode_and_play,
-            args=(ffmpeg, src_path, slot, gen),
+            args=(ffmpeg, src_path, slot, gen, swap_lr),
             name="bms2dtx-preview",
             daemon=True,
         )
@@ -196,16 +211,21 @@ class PreviewPlayer:
         with self._lock:
             return gen == self._generation and not self._closed
 
-    def _decode_and_play(self, ffmpeg: str, src: Path, slot: int, gen: int) -> None:
+    def _decode_and_play(
+        self, ffmpeg: str, src: Path, slot: int, gen: int, swap_lr: bool = False
+    ) -> None:
         try:
             tmp_dir = self._ensure_temp_dir()
             dst = tmp_dir / f"slot_{slot}.wav"
             # Make sure nothing still holds the slot file before overwriting it.
             self._purge()
-            self._decoder(ffmpeg, src, dst)
+            if self._decoder_accepts_swap_lr:
+                self._decoder(ffmpeg, src, dst, swap_lr=swap_lr)
+            else:
+                self._decoder(ffmpeg, src, dst)
         except Exception as exc:
             if self._is_current(gen):
-                if src.suffix.lower() == ".wav":
+                if src.suffix.lower() == ".wav" and not swap_lr:
                     self._play_file(src, gen, direct=True)
                 else:
                     self._status(tr("preview_decode_failed", exc=exc))

@@ -22,12 +22,14 @@ from core import (
     WavEntry,
     base36_to_int,
     base62_to_int,
+    resolve_auto_bind_wav_id,
 )
 
 from .i18n import tr
 
 GRAY_FOREGROUND = "#888888"
 NO_BIND_LABEL = "(未指定 / 00)"
+AUTO_BIND_SENTINEL = "__AUTO__"
 TAB_NOTES: Dict[TabId, str] = {
     TabId.OTHER: "固定分配至 SE6 (通道 66)",
     TabId.GUITAR: "可选：留空即禁用并自动释放 SE11–SE12",
@@ -179,22 +181,50 @@ class AssignmentModel:
         default_factory=lambda: {spec.tab_id: [] for spec in TAB_SPECS}
     )
     default_binds: Dict[TabId, str] = field(default_factory=dict)
+    explicit_unbinds: set[TabId] = field(default_factory=set)
     separate_lbd: bool = False
+    default_bind_mode: str = "auto"
     chart: Optional[BmsChart] = field(default=None, repr=False, compare=False)
 
     def set_chart(self, chart: Optional[BmsChart]) -> None:
         self.chart = chart
 
+    def set_default_bind_mode(self, mode: str) -> None:
+        self.default_bind_mode = "auto" if str(mode).strip().lower() == "auto" else "manual"
+
     def clear(self) -> None:
         for tab in self.tab_wavs:
             self.tab_wavs[tab] = []
         self.default_binds.clear()
+        self.explicit_unbinds.clear()
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Return a detached copy of mapping state for Undo/Redo."""
+        return {
+            "tab_wavs": {tab: list(ids) for tab, ids in self.tab_wavs.items()},
+            "default_binds": dict(self.default_binds),
+            "explicit_unbinds": set(self.explicit_unbinds),
+            "separate_lbd": bool(self.separate_lbd),
+            "default_bind_mode": self.default_bind_mode,
+        }
+
+    def restore(self, snap: Dict[str, Any]) -> None:
+        """Restore mapping state from a snapshot produced by :meth:`snapshot`."""
+        raw_tabs = snap.get("tab_wavs", {})
+        for spec in TAB_SPECS:
+            self.tab_wavs[spec.tab_id] = list(raw_tabs.get(spec.tab_id, ()))
+        self.default_binds = dict(snap.get("default_binds", {}))
+        self.explicit_unbinds = set(snap.get("explicit_unbinds", ()))
+        self.separate_lbd = bool(snap.get("separate_lbd", False))
+        if "default_bind_mode" in snap:
+            self.set_default_bind_mode(str(snap["default_bind_mode"]))
 
     def set_separate_lbd(self, enabled: bool) -> None:
         self.separate_lbd = bool(enabled)
         if not self.separate_lbd:
             self.tab_wavs[TabId.LBD] = []
             self.default_binds.pop(TabId.LBD, None)
+            self.explicit_unbinds.discard(TabId.LBD)
 
     def tab_of(self, wav_id: str) -> Optional[TabId]:
         for tab, ids in self.tab_wavs.items():
@@ -280,38 +310,101 @@ class AssignmentModel:
         self.tab_wavs[tab] = kept
         if self.default_binds.get(tab) in removed:
             del self.default_binds[tab]
+        if not kept:
+            self.explicit_unbinds.discard(tab)
         return removed
+
+    def auto_bind_for_tab(
+        self, tab: TabId, chart: Optional[BmsChart] = None
+    ) -> Optional[str]:
+        """Return the highest-frequency representative WAV ID currently in ``tab``."""
+        if tab not in DRUM_TABS:
+            return None
+        active_chart = chart if chart is not None else self.chart
+        display_ids = self.display_ids_for_tab(tab, active_chart)
+        if not display_ids:
+            return None
+        return resolve_auto_bind_wav_id(active_chart, display_ids)
+
+    def effective_bind(
+        self, tab: TabId, chart: Optional[BmsChart] = None
+    ) -> Tuple[Optional[str], bool]:
+        """Return ``(effective_wav_id, is_auto_selected)`` for ``tab``."""
+        if tab not in DRUM_TABS or not self.tab_wavs[tab]:
+            return None, False
+        manual = self.default_binds.get(tab)
+        if manual and manual in self.tab_wavs[tab]:
+            return manual, False
+        if tab in self.explicit_unbinds:
+            return None, False
+        if self.default_bind_mode == "auto":
+            return self.auto_bind_for_tab(tab, chart), True
+        return None, False
 
     def set_bind(self, tab: TabId, wav_id: Optional[str]) -> None:
         if tab not in DRUM_TABS:
             raise ValueError(f"Tab {tab.value} does not support default binding")
+        if wav_id == AUTO_BIND_SENTINEL:
+            self.default_binds.pop(tab, None)
+            self.explicit_unbinds.discard(tab)
+            return
         if not wav_id or wav_id == "00":
             self.default_binds.pop(tab, None)
+            if self.default_bind_mode == "auto":
+                self.explicit_unbinds.add(tab)
+            else:
+                self.explicit_unbinds.discard(tab)
             return
         if wav_id not in self.tab_wavs[tab]:
             raise ValueError(f"{wav_id} is not in tab {tab.value}")
         self.default_binds[tab] = wav_id
+        self.explicit_unbinds.discard(tab)
 
     def get_bind(self, tab: TabId) -> Optional[str]:
         return self.default_binds.get(tab)
 
     def to_mapping_config(self) -> MappingConfig:
-        """Build a v1 ``MappingConfig`` (Toggle = OFF only)."""
+        """Build a v1/v1.2 ``MappingConfig`` (Toggle = OFF only)."""
         tab_wavs = {
             t: list(ids)
             for t, ids in self.tab_wavs.items()
             if ids and (self.separate_lbd or t != TabId.LBD)
         }
+        # Extra guard: if residual LBD items somehow exist when LBD is hidden, fold into BD
+        if not self.separate_lbd and self.tab_wavs.get(TabId.LBD):
+            bd_list = tab_wavs.setdefault(TabId.BD, [])
+            bd_seen = set(bd_list)
+            for wid in self.tab_wavs[TabId.LBD]:
+                if wid not in bd_seen:
+                    bd_list.append(wid)
+                    bd_seen.add(wid)
+
         default_binds = {
             t: w
             for t, w in self.default_binds.items()
             if w and (self.separate_lbd or t != TabId.LBD)
         }
+        if not self.separate_lbd and TabId.LBD in self.default_binds and TabId.BD not in default_binds:
+            lbd_bind = self.default_binds[TabId.LBD]
+            if lbd_bind:
+                default_binds[TabId.BD] = lbd_bind
+
+        if self.default_bind_mode == "auto":
+            for tab in self.explicit_unbinds:
+                if (
+                    tab in DRUM_TABS
+                    and (self.separate_lbd or tab != TabId.LBD)
+                    and tab not in default_binds
+                    and tab in tab_wavs
+                ):
+                    default_binds[tab] = "00"
+
         return MappingConfig(
             tab_wavs=tab_wavs,
             default_lane_binds=default_binds,
             toggle_on=False,
             separate_lbd=self.separate_lbd,
+            default_bind_mode=self.default_bind_mode,
         )
 
     # ----- JSON (matches cli.py --map-json) -----
@@ -331,7 +424,10 @@ class AssignmentModel:
         """Replace assignments from a mapping dict. Returns human-readable notes/warnings."""
         notes: List[str] = []
         active_chart = chart if chart is not None else self.chart
-        new_model = AssignmentModel(chart=active_chart)
+        new_model = AssignmentModel(
+            chart=active_chart,
+            default_bind_mode=self.default_bind_mode,
+        )
         new_model.separate_lbd = bool(data.get("separate_lbd", self.separate_lbd))
         valid = set(active_chart.wavs.keys()) if active_chart is not None else None
         for raw_tab, raw_ids in dict(data.get("tab_wavs", {})).items():
@@ -370,6 +466,7 @@ class AssignmentModel:
             notes.append(tr("map_note_toggle_on_ignored"))
         self.tab_wavs = new_model.tab_wavs
         self.default_binds = new_model.default_binds
+        self.explicit_unbinds = new_model.explicit_unbinds
         self.separate_lbd = new_model.separate_lbd
         return notes
 
@@ -417,6 +514,33 @@ def filter_wav_ids(
                 continue
         result.append(rep_id)
     return result
+
+
+def format_wav_tree_values(
+    entry: WavEntry,
+    assigned_tab: Optional[TabId] = None,
+    *,
+    chart: Optional[BmsChart] = None,
+    group_ids: Optional[Sequence[str]] = None,
+    total_use_count: Optional[int] = None,
+) -> Tuple[str, str, str, str]:
+    """Return 4 column strings `(ID, Filename, Count, Target)` for left ttk.Treeview."""
+    if group_ids is None and chart is not None:
+        group_ids = wav_group_for(chart, entry.wav_id)
+    ids_label = ", ".join(group_ids) if group_ids else entry.wav_id
+    if total_use_count is not None:
+        use_count = total_use_count
+    elif chart is not None and group_ids:
+        use_count = sum(chart.wavs[w].use_count for w in group_ids if w in chart.wavs)
+    else:
+        use_count = entry.use_count
+
+    fname = entry.resolved_name
+    if not entry.exists:
+        fname = f"{fname} {tr('tag_missing')}"
+    count_str = f"×{use_count}"
+    target_str = tab_label(assigned_tab) if assigned_tab is not None else ""
+    return (ids_label, fname, count_str, target_str)
 
 
 def format_wav_row(
@@ -467,9 +591,16 @@ def format_tab_row(
 def bind_combobox_values(
     model: AssignmentModel, chart: Optional[BmsChart], tab: TabId
 ) -> List[Tuple[str, Optional[str]]]:
-    """``[(display_text, wav_id_or_None)]`` for a drum Tab's default-bind Combobox."""
+    """``[(display_text, token_or_None)]`` for a drum Tab's default-bind Combobox."""
     active_chart = chart if chart is not None else model.chart
-    values: List[Tuple[str, Optional[str]]] = [(get_no_bind_label(), None)]
+    values: List[Tuple[str, Optional[str]]] = []
+    if model.default_bind_mode == "auto":
+        auto_wid = model.auto_bind_for_tab(tab, active_chart)
+        if auto_wid is not None:
+            auto_entry = active_chart.wavs.get(auto_wid) if active_chart is not None else None
+            auto_text = f"{tr('auto_bind_prefix')}{format_tab_row(auto_entry, auto_wid, chart=active_chart)}"
+            values.append((auto_text, AUTO_BIND_SENTINEL))
+    values.append((get_no_bind_label(), None))
     for wid in model.display_ids_for_tab(tab, active_chart):
         entry = active_chart.wavs.get(wid) if active_chart is not None else None
         values.append((format_tab_row(entry, wid, chart=active_chart), wid))
@@ -478,7 +609,7 @@ def bind_combobox_values(
 
 # --------------------------------------------------------------------- summaries
 def radix_text(chart: BmsChart) -> str:
-    base = "Base-62" if chart.is_base62 else "Base-36"
+    base = tr("radix_base62_ext") if chart.is_base62 else tr("radix_base36_ok")
     text = base
     if chart.is_base62:
         text += tr("radix_warn_base62")

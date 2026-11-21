@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .audio_resolver import ParentFolderAudioIndex
 from .dtx_writer import generate_dtx_text, write_dtx_file
 from .mapping import build_mapping_plan
-from .mixer import materialize_preview_audio, materialize_retained_slices, render_bgm_ogg
+from .mixer import (
+    materialize_bga,
+    materialize_images,
+    materialize_preview_audio,
+    materialize_retained_slices,
+    render_bgm_ogg,
+)
 from .models import (
     BmsChart,
     ConversionOptions,
@@ -110,6 +117,7 @@ def convert_bms(
                 slicer_bgm_columns=[],
                 overflow_strategy="fail",
                 separate_lbd=config.separate_lbd,
+                default_bind_mode=config.default_bind_mode,
             )
             plan = build_mapping_plan(chart, fallback_cfg, auto_merge_duplicates=False)
             all_warnings.extend(plan.warnings)
@@ -147,20 +155,68 @@ def convert_bms(
             ogg_quality=options.ogg_quality,
             ffmpeg_path=options.ffmpeg_path,
             reserve_bgm_ogg=not effective_toggle_on,
+            swap_lr=options.swap_lr,
         )
     )
     all_warnings.extend(mat_warnings)
 
-    # Materialize #PREVIEW audio file (plain copy, avoiding name collision with slices or bgm.ogg)
+    claimed_names: List[str] = list(orig_to_out_name.values())
+
+    # Materialize #PREVIEW audio file (copy/swap, avoiding name collision with slices or bgm.ogg)
     preview_dtx_rel, preview_dst_path = materialize_preview_audio(
         chart,
         output_dir,
-        list(orig_to_out_name.values()),
+        claimed_names,
         copy_files=options.copy_retained_audio,
         reserve_bgm_ogg=not effective_toggle_on,
+        swap_lr=options.swap_lr,
+        ffmpeg_path=options.ffmpeg_path,
+        ogg_quality=options.ogg_quality,
     )
-    if preview_dst_path is not None:
+    if preview_dtx_rel:
+        claimed_names.append(preview_dtx_rel)
+    if preview_dst_path is not None and preview_dst_path not in copied_files:
         copied_files.append(preview_dst_path)
+
+    # Materialize #STAGEFILE / #PREIMAGE / #BACKGROUND images
+    (
+        stagefile_rel,
+        preimage_rel,
+        background_rel,
+        stagefile_dst,
+        preimage_dst,
+        background_dst,
+        img_warnings,
+    ) = materialize_images(
+        chart,
+        output_dir,
+        claimed_names,
+        image_mode=options.image_mode,
+        copy_files=options.copy_retained_audio,
+        reserve_bgm_ogg=not effective_toggle_on,
+        ffmpeg_path=options.ffmpeg_path,
+    )
+    all_warnings.extend(img_warnings)
+    for rel_item in (stagefile_rel, preimage_rel, background_rel):
+        if rel_item:
+            claimed_names.append(rel_item)
+    for dst_item in (stagefile_dst, preimage_dst, background_dst):
+        if dst_item is not None and dst_item not in copied_files:
+            copied_files.append(dst_item)
+
+    # Experimental BGA passthrough (#BMPxx/#AVIxx + channels 04/07/54)
+    bga_headers: List[Tuple[str, str, str]] = []
+    bga_placed_events: List[Tuple[int, Fraction, str, str]] = []
+    bga_copied_files: List[Path] = []
+    if options.export_bga:
+        bga_headers, bga_placed_events, bga_copied_files, bga_warnings = materialize_bga(
+            chart,
+            output_dir,
+            claimed_names,
+            copy_files=options.copy_retained_audio,
+            reserve_bgm_ogg=not effective_toggle_on,
+        )
+        all_warnings.extend(bga_warnings)
 
     # Build final DTX #WAVxx table in exact sequential Base-36 order
     dtx_wav_table: List[Tuple[str, str]] = []
@@ -192,6 +248,7 @@ def convert_bms(
             ffmpeg_path=options.ffmpeg_path,
             decode_cache=decode_cache,
             cut_same_wav=options.cut_same_wav,
+            swap_lr=options.swap_lr,
         )
         all_warnings.extend(mix_warnings)
 
@@ -205,6 +262,13 @@ def convert_bms(
         dlevel=options.dlevel,
         comment=options.comment,
         preview_filename=preview_dtx_rel,
+        stagefile_filename=stagefile_rel,
+        preimage_filename=preimage_rel,
+        background_filename=background_rel,
+        dtx_wav_labels=plan.dtx_wav_labels,
+        wav_labels=options.wav_labels,
+        bga_headers=bga_headers,
+        bga_placed_events=bga_placed_events,
     )
     all_warnings.extend(writer_warnings)
 
@@ -231,6 +295,10 @@ def convert_bms(
         warnings=all_warnings,
         nudged_overflow_count=nudged_overflow_count,
         preview_path=preview_dst_path,
+        stagefile_path=stagefile_dst,
+        preimage_path=preimage_dst,
+        background_path=background_dst,
+        bga_copied_files=bga_copied_files,
     )
 
 

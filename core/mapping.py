@@ -44,6 +44,56 @@ class MappingPlan:
     bass_enabled: bool
     tab_collision_events: List[NoteEvent] = field(default_factory=list)
     warnings: List[ConversionWarning] = field(default_factory=list)
+    dtx_wav_labels: Dict[str, str] = field(default_factory=dict)
+
+
+def resolve_auto_bind_wav_id(
+    chart: Optional[BmsChart], wav_ids: Sequence[str]
+) -> Optional[str]:
+    """Pick the highest-frequency WAV ID among wav_ids (ties broken by list order)."""
+    cleaned = [w for w in wav_ids if w]
+    if not cleaned:
+        return None
+    if chart is None:
+        return cleaned[0]
+
+    phys_groups: Dict[str, List[str]] = defaultdict(list)
+    wid_to_phys: Dict[str, str] = {}
+    for wid, entry in chart.wavs.items():
+        if entry.exists and entry.resolved_path is not None:
+            phys = os.path.normcase(os.path.abspath(str(entry.resolved_path)))
+            phys_groups[phys].append(wid)
+            wid_to_phys[wid] = phys
+
+    group_order: List[str] = []
+    group_rep: Dict[str, str] = {}
+    group_score: Dict[str, int] = {}
+
+    for wid in cleaned:
+        phys = wid_to_phys.get(wid)
+        gkey = f"P:{phys}" if phys is not None else f"M:{wid}"
+        if gkey in group_rep:
+            continue
+        group_order.append(gkey)
+        group_rep[gkey] = wid
+        score = 0
+        members = phys_groups[phys] if phys is not None else [wid]
+        seen_members: Set[str] = set()
+        for mwid in members:
+            if mwid in seen_members:
+                continue
+            seen_members.add(mwid)
+            entry = chart.wavs.get(mwid)
+            if entry is not None:
+                score += entry.use_count
+            else:
+                score += sum(1 for ev in chart.events if ev.wav_id == mwid)
+        group_score[gkey] = score
+
+    if not group_order:
+        return None
+    best_key = max(group_order, key=lambda gk: group_score[gk])
+    return group_rep[best_key]
 
 
 def _norm_wav_id(chart: BmsChart, wid: str) -> str:
@@ -95,6 +145,16 @@ def build_mapping_plan(
             seen_in_tab.add(wid)
             wav_to_tab[wid] = tab
             normalized_tab_wavs[tab].append(wid)
+
+    # When LBD is hidden (separate_lbd=False), fold any residual LBD assignments deterministically into BD
+    if not config.separate_lbd and normalized_tab_wavs[TabId.LBD]:
+        existing_bd = set(normalized_tab_wavs[TabId.BD])
+        for wid in normalized_tab_wavs[TabId.LBD]:
+            wav_to_tab[wid] = TabId.BD
+            if wid not in existing_bd:
+                normalized_tab_wavs[TabId.BD].append(wid)
+                existing_bd.add(wid)
+        normalized_tab_wavs[TabId.LBD] = []
 
     def _merge_unassigned_siblings() -> None:
         for tab in TAB_ORDER:
@@ -276,20 +336,51 @@ def build_mapping_plan(
 
     # 4. Generate #DTXC_LANEBINDEDCHIP lines (only for drum tabs 1..12)
     normalized_binds: Dict[TabId, str] = {}
+    explicit_unbind_tabs: Set[TabId] = set()
+    auto_bind_tabs: Set[TabId] = set()
+    raw_bind_tabs: Set[TabId] = {_resolve_tab_key(rt) for rt in config.default_lane_binds}
     for raw_tab, raw_wid in config.default_lane_binds.items():
         tab = _resolve_tab_key(raw_tab)
+        if not config.separate_lbd and tab == TabId.LBD:
+            cleaned_lbd = str(raw_wid).strip()
+            if (
+                not cleaned_lbd
+                or cleaned_lbd == "00"
+                or cleaned_lbd.lower() in ("none", "auto")
+                or TabId.BD in raw_bind_tabs
+            ):
+                continue
+            tab = TabId.BD
         if tab not in DRUM_TABS:
             raise ValueError(
                 f"Tab {tab.value} does not support #DTXC_LANEBINDEDCHIP default binding."
             )
-        wid = _norm_wav_id(chart, raw_wid)
-        if not wid or wid == "00":
+        cleaned_raw = str(raw_wid).strip()
+        if not cleaned_raw or cleaned_raw == "00" or cleaned_raw.lower() == "none":
+            explicit_unbind_tabs.add(tab)
             continue
+        if cleaned_raw.lower() == "auto":
+            auto_bind_tabs.add(tab)
+            continue
+        wid = _norm_wav_id(chart, cleaned_raw)
         if wid not in wav_id_map:
             raise ValueError(
                 f"Default bound WAV {wid!r} for tab {tab.value} is not mapped into any retained WAV."
             )
         normalized_binds[tab] = wav_id_map[wid]
+
+    global_auto_bind = str(config.default_bind_mode).strip().lower() == "auto"
+    for tab in DRUM_TABS:
+        if tab in normalized_binds or tab in explicit_unbind_tabs:
+            continue
+        if not (global_auto_bind or tab in auto_bind_tabs):
+            continue
+        tab_wids = normalized_tab_wavs[tab]
+        if not tab_wids:
+            continue
+        best_orig = resolve_auto_bind_wav_id(chart, tab_wids)
+        if best_orig is not None and best_orig in wav_id_map:
+            normalized_binds[tab] = wav_id_map[best_orig]
 
     lane_bind_lines: List[str] = []
     for lane_code, main_tab, sub_tab in DTXC_BIND_LANES:
@@ -409,6 +500,15 @@ def build_mapping_plan(
     guitar_enabled = len(normalized_tab_wavs[TabId.GUITAR]) > 0
     bass_enabled = len(normalized_tab_wavs[TabId.BASS]) > 0
 
+    dtx_wav_labels: Dict[str, str] = {}
+    if not effective_toggle_on:
+        dtx_wav_labels["01"] = "BGM"
+    for orig_wid in ordered_retained_orig_ids:
+        dtx_wid = wav_id_map[orig_wid]
+        tab = wav_to_tab.get(orig_wid)
+        if tab is not None:
+            dtx_wav_labels[dtx_wid] = tab.value
+
     return MappingPlan(
         effective_toggle_on=effective_toggle_on,
         toggle_off_forced=toggle_off_forced,
@@ -423,4 +523,5 @@ def build_mapping_plan(
         bass_enabled=bass_enabled,
         tab_collision_events=tab_collision_events,
         warnings=warnings,
+        dtx_wav_labels=dtx_wav_labels,
     )

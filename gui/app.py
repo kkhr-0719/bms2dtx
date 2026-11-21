@@ -1,4 +1,4 @@
-"""bms2dtx desktop GUI (tkinter / ttk). v1.1 scope: Toggle = OFF only."""
+"""bms2dtx desktop GUI (tkinter / ttk). v1.2.0: Toggle = OFF only."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -17,7 +17,13 @@ import tkinter.font as tkfont
 
 import core
 from core import (
+    DEFAULT_WAV_LABELS,
+    IMAGE_MODE_KEEP,
+    IMAGE_MODE_NONE,
+    IMAGE_MODE_RESIZE,
+    TAB_SPEC_MAP,
     TAB_SPECS,
+    WAV_LABEL_KEYS,
     BmsChart,
     ConversionOptions,
     FfmpegNotFoundError,
@@ -25,11 +31,13 @@ from core import (
     convert_bms,
     find_ffmpeg,
     inspect_bms,
+    sanitize_wav_label,
 )
 
 from . import APP_NAME, APP_VERSION
 from .auto_guess import guess_assignments
 from .helpers import (
+    AUTO_BIND_SENTINEL,
     GRAY_FOREGROUND,
     AssignmentModel,
     bind_combobox_values,
@@ -40,7 +48,7 @@ from .helpers import (
     filter_wav_ids,
     format_tab_row,
     format_warnings,
-    format_wav_row,
+    format_wav_tree_values,
     get_no_bind_label,
     get_tab_note,
     load_mapping_json,
@@ -60,8 +68,8 @@ from .i18n import (
     LANGUAGE_LABELS,
     SUPPORTED_LANGUAGES,
     get_language,
-    load_language_preference,
-    save_language_preference,
+    load_app_settings,
+    save_app_settings,
     set_language,
     tr,
 )
@@ -69,12 +77,15 @@ from .preview_player import PreviewPlayer
 
 ERROR_RED = "#c62828"
 OK_GREEN = "#2e7d32"
+WARN_AMBER = "#b26a00"
 ACTIVE_TAB_BG = "#1565c0"
 ACTIVE_TAB_FG = "#ffffff"
 INACTIVE_TAB_BG = "#f0f0f0"
 INACTIVE_TAB_FG = "#111111"
 ASSIGNED_TAB_FG = "#0d47a1"
 TAB_GRID_COLUMNS = 5
+MAX_UNDO_HISTORY = 100
+_IMAGE_MODES_ORDER = (IMAGE_MODE_KEEP, IMAGE_MODE_RESIZE, IMAGE_MODE_NONE)
 
 
 def enable_hidpi() -> None:
@@ -92,6 +103,75 @@ def enable_hidpi() -> None:
         pass
 
 
+class _Tooltip:
+    """Lightweight dynamic-text hover tooltip for ttk/tk widgets."""
+
+    def __init__(self, widget: tk.Widget, text_getter: Callable[[], str]) -> None:
+        self._widget = widget
+        self._text_getter = text_getter
+        self._tip_win: Optional[tk.Toplevel] = None
+        self._after_id: Optional[str] = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+        widget.bind("<Destroy>", self._on_leave, add="+")
+
+    def _on_enter(self, _event: Any = None) -> None:
+        self._cancel()
+        try:
+            self._after_id = self._widget.after(380, self._show)
+        except Exception:
+            pass
+
+    def _on_leave(self, _event: Any = None) -> None:
+        self._cancel()
+        self._hide()
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self._widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        self._after_id = None
+        text = self._text_getter()
+        if not text:
+            return
+        try:
+            x = self._widget.winfo_rootx() + 16
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+            win = tk.Toplevel(self._widget)
+            win.wm_overrideredirect(True)
+            win.wm_geometry(f"+{x}+{y}")
+            lbl = tk.Label(
+                win,
+                text=text,
+                background="#ffffe0",
+                foreground="#222222",
+                relief="solid",
+                borderwidth=1,
+                padx=6,
+                pady=3,
+                wraplength=320,
+                justify="left",
+            )
+            lbl.pack()
+            self._tip_win = win
+        except Exception:
+            self._hide()
+
+    def _hide(self) -> None:
+        if self._tip_win is not None:
+            try:
+                self._tip_win.destroy()
+            except Exception:
+                pass
+            self._tip_win = None
+
+
 class TabPanel:
     """One right-hand Tab page: note, optional default-bind Combobox, Listbox."""
 
@@ -105,6 +185,7 @@ class TabPanel:
         self.bind_label: Optional[ttk.Label] = None
         self.combo: Optional[ttk.Combobox] = None
         self.combo_var = tk.StringVar(value=get_no_bind_label())
+        self._arrow_previewed_idx: Optional[int] = None
 
         row = 0
         note = get_tab_note(tab)
@@ -138,24 +219,82 @@ class TabPanel:
         self.frame.rowconfigure(row, weight=1)
         self.frame.columnconfigure(0, weight=1)
 
+        self.listbox.bind("<FocusIn>", lambda _e: self.app._set_focus_side("right"))
+        self.listbox.bind("<Button-1>", self._on_right_click)
+        self.listbox.bind("<KeyPress-Up>", self._on_right_arrow_press)
+        self.listbox.bind("<KeyPress-Down>", self._on_right_arrow_press)
+        self.listbox.bind("<KeyRelease-Up>", self._on_right_arrow_release)
+        self.listbox.bind("<KeyRelease-Down>", self._on_right_arrow_release)
         self.listbox.bind(
-            "<Double-Button-1>", lambda _e: (self.app.preview_from_tab(self.tab), "break")[1]
+            "<Double-Button-1>",
+            lambda _e: (
+                None if self.app.auto_preview_var.get() else self.app.preview_from_tab(self.tab),
+                "break",
+            )[1],
         )
         self.listbox.bind("<space>", lambda _e: (self.app.preview_from_tab(self.tab), "break")[1])
 
+    def _on_right_click(self, event: Any) -> None:
+        self.app._set_focus_side("right")
+        if not self.app.auto_preview_var.get() or self.app.chart is None or not self.ids:
+            return
+        idx = self.listbox.nearest(event.y)
+        if 0 <= idx < len(self.ids):
+            self.app._play_wav_id(self.ids[idx])
+
+    def _on_right_arrow_press(self, _event: Any = None) -> None:
+        self.app._set_focus_side("right")
+        if not self.app.auto_preview_var.get() or self.app.chart is None or not self.ids:
+            return
+        try:
+            self.app.root.after_idle(self._on_right_arrow_after_keypress)
+        except Exception:
+            pass
+
+    def _on_right_arrow_after_keypress(self) -> None:
+        if not self.app.auto_preview_var.get() or self.app.chart is None or not self.ids:
+            return
+        try:
+            active_idx = int(self.listbox.index(tk.ACTIVE))
+        except Exception:
+            return
+        if 0 <= active_idx < len(self.ids):
+            self._arrow_previewed_idx = active_idx
+            self.app._play_wav_id(self.ids[active_idx])
+
+    def _on_right_arrow_release(self, _event: Any = None) -> None:
+        if not self.app.auto_preview_var.get() or self.app.chart is None or not self.ids:
+            return
+        try:
+            active_idx = int(self.listbox.index(tk.ACTIVE))
+        except Exception:
+            return
+        if self._arrow_previewed_idx == active_idx:
+            self._arrow_previewed_idx = None
+            return
+        self._arrow_previewed_idx = None
+        if 0 <= active_idx < len(self.ids):
+            self.app._play_wav_id(self.ids[active_idx])
+
     def _on_bind_selected(self, _event: Any = None) -> None:
         idx = self.combo.current() if self.combo is not None else 0
-        wav_id = self.bind_ids[idx] if 0 <= idx < len(self.bind_ids) else None
+        token = self.bind_ids[idx] if 0 <= idx < len(self.bind_ids) else None
+        before = self.app.model.snapshot()
         try:
-            self.app.model.set_bind(self.tab, wav_id)
+            self.app.model.set_bind(self.tab, token)
         except ValueError:
             self.app.model.default_binds.pop(self.tab, None)
+        self.app._commit_undo(before)
+
+        eff_wid, is_auto = self.app.model.effective_bind(self.tab, self.app.chart)
+        if is_auto and eff_wid:
+            wav_label = f"{tr('status_bind_auto_label')} -> {eff_wid}"
+        elif eff_wid:
+            wav_label = eff_wid
+        else:
+            wav_label = get_no_bind_label()
         self.app.set_status(
-            tr(
-                "status_bind_updated",
-                tab=tab_label(self.tab),
-                wav=wav_id or get_no_bind_label(),
-            )
+            tr("status_bind_updated", tab=tab_label(self.tab), wav=wav_label)
         )
 
     def update_language_texts(self) -> None:
@@ -169,31 +308,47 @@ class TabPanel:
     def refresh(self) -> None:
         model = self.app.model
         chart = self.app.chart
+        keep_sel = {self.ids[i] for i in self.listbox.curselection() if i < len(self.ids)}
         self.ids = model.display_ids_for_tab(self.tab, chart)
         self.listbox.delete(0, tk.END)
-        for wid in self.ids:
+        for idx, wid in enumerate(self.ids):
             entry = chart.wavs.get(wid) if chart else None
             self.listbox.insert(tk.END, format_tab_row(entry, wid, chart=chart))
+            if wid in keep_sel:
+                self.listbox.selection_set(idx)
         if self.combo is not None:
             values = bind_combobox_values(model, chart, self.tab)
-            self.bind_ids = [wid for _text, wid in values]
-            self.combo.configure(values=[text for text, _wid in values])
-            bound = model.get_bind(self.tab)
-            # Match either direct bound ID or its physical-file group representative
-            bound_idx = 0
-            if bound is not None:
-                if bound in self.bind_ids:
-                    bound_idx = self.bind_ids.index(bound)
+            self.bind_ids = [token for _text, token in values]
+            self.combo.configure(values=[text for text, _token in values])
+
+            _eff_wid, is_auto = model.effective_bind(self.tab, chart)
+            manual = model.default_binds.get(self.tab)
+            none_idx = self.bind_ids.index(None) if None in self.bind_ids else 0
+            bound_idx = none_idx
+
+            if manual is not None:
+                if manual in self.bind_ids:
+                    bound_idx = self.bind_ids.index(manual)
                 elif chart is not None:
-                    group = set(wav_group_for(chart, bound))
+                    group = set(wav_group_for(chart, manual))
                     for candidate_idx, cid in enumerate(self.bind_ids):
-                        if cid is not None and cid in group:
+                        if cid not in (None, AUTO_BIND_SENTINEL) and cid in group:
                             bound_idx = candidate_idx
                             break
                     else:
                         model.default_binds.pop(self.tab, None)
+                        bound_idx = (
+                            self.bind_ids.index(AUTO_BIND_SENTINEL)
+                            if (model.default_bind_mode == "auto" and AUTO_BIND_SENTINEL in self.bind_ids)
+                            else none_idx
+                        )
                 else:
                     model.default_binds.pop(self.tab, None)
+            elif is_auto and AUTO_BIND_SENTINEL in self.bind_ids:
+                bound_idx = self.bind_ids.index(AUTO_BIND_SENTINEL)
+            else:
+                bound_idx = none_idx
+
             self.combo.current(bound_idx)
 
     def selected_ids(self) -> List[str]:
@@ -212,31 +367,59 @@ class App:
         self.root = root
         self.startup_dialogs = startup_dialogs
         self.config_path: Optional[Path] = Path(config_path) if config_path is not None else None
-        self._persist_lang = (self.config_path is not None) or self.startup_dialogs
-        if self._persist_lang:
-            set_language(load_language_preference(self.config_path))
+        self._persist_settings = (self.config_path is not None) or self.startup_dialogs
+
+        loaded_cfg = load_app_settings(self.config_path) if self._persist_settings else {
+            "language": get_language(),
+            "ffmpeg_path": None,
+            "default_bind_mode": "auto",
+            "swap_lr": False,
+            "wav_labels": dict(DEFAULT_WAV_LABELS),
+        }
+        if self._persist_settings:
+            set_language(str(loaded_cfg.get("language", "zh_CN")))
 
         self.chart: Optional[BmsChart] = None
-        self.model = AssignmentModel()
-        self.ffmpeg_explicit: Optional[str] = None
+        self.model = AssignmentModel(default_bind_mode=str(loaded_cfg.get("default_bind_mode", "auto")))
+        self.wav_labels: Dict[str, str] = dict(loaded_cfg.get("wav_labels", DEFAULT_WAV_LABELS))
+        self.ffmpeg_explicit: Optional[str] = loaded_cfg.get("ffmpeg_path")
         self.ffmpeg_path: Optional[str] = None
         self.last_output_dir: Optional[Path] = None
         self._busy = False
         self._left_ids: List[str] = []
+        self._left_id_set: set[str] = set()
         self._active_tab: TabId = TabId.LC
-        self._arrow_previewed_idx: Optional[int] = None
+        self._last_focus_side: str = "left"
+        self._arrow_previewed_iid: Optional[str] = None
         self._queue: "queue.Queue[tuple]" = queue.Queue()
         self._ffmpeg_warned = False
 
-        root.title(f"{APP_NAME} {APP_VERSION} — BMS/BME → DTX")
+        self._undo_stack: List[Dict[str, Any]] = []
+        self._redo_stack: List[Dict[str, Any]] = []
+        self._clean_snapshot: Dict[str, Any] = self.model.snapshot()
+        self.dirty: bool = False
+
+        self._icon_image: Optional[tk.PhotoImage] = None
+        self._dnd_hwnd: Optional[int] = None
+        self._orig_wndproc: Optional[int] = None
+        self._wndproc_ref: Any = None
+        self._set_wndproc_fn: Any = None
+
+        self._update_window_title()
+        self._apply_window_icon()
         self._setup_fonts_and_geometry()
+
+        self.swap_lr_var = tk.BooleanVar(value=bool(loaded_cfg.get("swap_lr", False)))
         self.player = PreviewPlayer(
             lambda: self.ffmpeg_path,
             on_status=lambda msg: self._queue.put(("preview_status", msg)),
+            swap_lr_getter=lambda: bool(self.swap_lr_var.get()),
         )
 
         self._build_ui()
+        self._bind_hotkeys()
         self.detect_ffmpeg()
+        self._setup_windows_drag_drop()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_id: Optional[str] = root.after(80, self._poll_queue)
 
@@ -246,6 +429,44 @@ class App:
             root.after(150, lambda: self.load_bms(initial_path))
 
     # ------------------------------------------------------------------ setup
+    def _update_window_title(self) -> None:
+        if self.chart is not None:
+            self.root.title(f"{APP_NAME} {APP_VERSION} [{self.chart.source_path}]")
+        else:
+            self.root.title(f"{APP_NAME} {APP_VERSION}")
+
+    def _apply_window_icon(self) -> None:
+        search_dirs: List[Path] = [
+            Path(sys.executable).resolve().parent,
+            Path(__file__).resolve().parent.parent,
+        ]
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            search_dirs.append(Path(meipass))
+
+        ico_candidates: List[Path] = []
+        png_candidates: List[Path] = []
+        for base in search_dirs:
+            ico_candidates.extend([base / "assets" / "icon.ico", base / "icon.ico"])
+            png_candidates.extend([base / "assets" / "icon.png", base / "icon.png"])
+
+        for ico in ico_candidates:
+            if ico.is_file():
+                try:
+                    self.root.iconbitmap(default=str(ico))
+                    return
+                except Exception:
+                    pass
+        for png in png_candidates:
+            if png.is_file():
+                try:
+                    img = tk.PhotoImage(file=str(png))
+                    self.root.iconphoto(True, img)
+                    self._icon_image = img
+                    return
+                except Exception:
+                    pass
+
     def _setup_fonts_and_geometry(self) -> None:
         try:
             families = set(tkfont.families(self.root))
@@ -263,44 +484,200 @@ class App:
             scale = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
         except Exception:
             scale = 1.0
+        self._dpi_scale = scale
         width = min(int(1180 * scale), self.root.winfo_screenwidth() - 40)
         height = min(int(780 * scale), self.root.winfo_screenheight() - 80)
         self.root.geometry(f"{width}x{height}")
         self.root.minsize(min(int(960 * scale), width), min(int(640 * scale), height))
+
+    def _setup_windows_drag_drop(self) -> None:
+        """Register native Win32 WM_DROPFILES via ctypes (supports Unicode CJK paths)."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            self.root.update_idletasks()
+            raw_hwnd = self.root.winfo_id()
+            if not raw_hwnd:
+                return
+
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+
+            user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+            user32.GetAncestor.restype = wintypes.HWND
+            top_hwnd = user32.GetAncestor(wintypes.HWND(raw_hwnd), 2) or raw_hwnd  # GA_ROOT = 2
+
+            shell32.DragAcceptFiles.argtypes = (wintypes.HWND, wintypes.BOOL)
+            shell32.DragAcceptFiles.restype = None
+            shell32.DragQueryFileW.argtypes = (
+                wintypes.HANDLE,
+                wintypes.UINT,
+                wintypes.LPWSTR,
+                wintypes.UINT,
+            )
+            shell32.DragQueryFileW.restype = wintypes.UINT
+            shell32.DragFinish.argtypes = (wintypes.HANDLE,)
+            shell32.DragFinish.restype = None
+
+            long_ptr_t = ctypes.c_ssize_t
+            wndproc_t = ctypes.WINFUNCTYPE(
+                long_ptr_t, wintypes.HWND, wintypes.UINT, ctypes.c_size_t, long_ptr_t
+            )
+            set_wndproc = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+            set_wndproc.argtypes = (wintypes.HWND, ctypes.c_int, long_ptr_t)
+            set_wndproc.restype = long_ptr_t
+            call_wndproc = user32.CallWindowProcW
+            call_wndproc.argtypes = (
+                long_ptr_t,
+                wintypes.HWND,
+                wintypes.UINT,
+                ctypes.c_size_t,
+                long_ptr_t,
+            )
+            call_wndproc.restype = long_ptr_t
+
+            gwlp_wndproc = -4
+            wm_dropfiles = 0x0233
+            shell32.DragAcceptFiles(wintypes.HWND(top_hwnd), True)
+
+            def _wndproc(hwnd: Any, msg: int, wparam: int, lparam: int) -> int:
+                if msg == wm_dropfiles:
+                    hdrop = wintypes.HANDLE(wparam)
+                    paths: List[str] = []
+                    try:
+                        count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+                        for idx in range(count):
+                            buf_len = shell32.DragQueryFileW(hdrop, idx, None, 0)
+                            buf = ctypes.create_unicode_buffer(buf_len + 2)
+                            shell32.DragQueryFileW(hdrop, idx, buf, buf_len + 2)
+                            if buf.value:
+                                paths.append(buf.value)
+                    finally:
+                        shell32.DragFinish(hdrop)
+                    if paths:
+                        self.root.after(0, lambda dropped=paths: self._handle_dropped_files(dropped))
+                    return 0
+                orig = self._orig_wndproc
+                if orig:
+                    return int(call_wndproc(orig, hwnd, msg, wparam, lparam))
+                return 0
+
+            cb = wndproc_t(_wndproc)
+            cb_addr = ctypes.cast(cb, ctypes.c_void_p).value
+            if cb_addr is None:
+                return
+            orig_proc = set_wndproc(wintypes.HWND(top_hwnd), gwlp_wndproc, long_ptr_t(cb_addr))
+            self._dnd_hwnd = int(top_hwnd)
+            self._orig_wndproc = int(orig_proc)
+            self._wndproc_ref = cb
+            self._set_wndproc_fn = set_wndproc
+        except Exception:
+            self._dnd_hwnd = None
+            self._orig_wndproc = None
+            self._wndproc_ref = None
+
+    def _teardown_windows_drag_drop(self) -> None:
+        if self._dnd_hwnd and self._orig_wndproc and self._set_wndproc_fn:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                self._set_wndproc_fn(
+                    wintypes.HWND(self._dnd_hwnd),
+                    -4,
+                    ctypes.c_ssize_t(self._orig_wndproc),
+                )
+            except Exception:
+                pass
+        self._dnd_hwnd = None
+        self._orig_wndproc = None
+        self._wndproc_ref = None
+
+    def _handle_dropped_files(self, paths: Sequence[str]) -> None:
+        if not paths or self._busy:
+            return
+        candidate = Path(paths[0])
+        if candidate.is_dir() or candidate.suffix.lower() not in (".bms", ".bme", ".bml"):
+            messagebox.showwarning(
+                tr("dialog_drop_invalid_title"),
+                tr("dialog_drop_invalid_body", name=candidate.name or str(candidate)),
+                parent=self.root,
+            )
+            return
+        self.load_bms(candidate)
+
+    def _bind_hotkeys(self) -> None:
+        for seq in ("<Control-z>", "<Control-Z>"):
+            self.root.bind_all(seq, self._on_ctrl_z)
+        for seq in ("<Control-y>", "<Control-Y>", "<Control-Shift-z>", "<Control-Shift-Z>"):
+            self.root.bind_all(seq, self._on_ctrl_y)
+
+    @staticmethod
+    def _is_text_input_focused(widget: Optional[tk.Misc]) -> bool:
+        return isinstance(widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text, tk.Spinbox))
+
+    def _on_ctrl_z(self, _event: Any = None) -> Optional[str]:
+        try:
+            focus = self.root.focus_get()
+        except Exception:
+            focus = None
+        if self._is_text_input_focused(focus):
+            return None
+        if self.on_undo():
+            return "break"
+        return None
+
+    def _on_ctrl_y(self, _event: Any = None) -> Optional[str]:
+        try:
+            focus = self.root.focus_get()
+        except Exception:
+            focus = None
+        if self._is_text_input_focused(focus):
+            return None
+        if self.on_redo():
+            return "break"
+        return None
 
     def _build_ui(self) -> None:
         root = self.root
         root.columnconfigure(0, weight=1)
         root.rowconfigure(2, weight=1)
 
-        # --- top bar: file picker + ffmpeg status + language selector ---
+        # --- slim top bar: open button | path/hint label | [missing ffmpeg badge] | config button ---
         top = ttk.Frame(root, padding=(8, 8, 8, 2))
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(1, weight=1)
         self.open_btn = ttk.Button(top, text=tr("open_bms_btn"), command=self.on_choose_file)
         self.open_btn.grid(row=0, column=0, sticky="w", ipadx=12, ipady=4)
-        self.path_var = tk.StringVar(value=tr("no_chart_selected"))
-        ttk.Label(top, textvariable=self.path_var).grid(row=0, column=1, sticky="w", padx=10)
-        self.ffmpeg_var = tk.StringVar()
-        self.ffmpeg_label = ttk.Label(top, textvariable=self.ffmpeg_var)
-        self.ffmpeg_label.grid(row=0, column=2, sticky="e", padx=6)
-        self.pick_ffmpeg_btn = ttk.Button(
-            top, text=tr("pick_ffmpeg_btn"), command=self.on_pick_ffmpeg
-        )
-        self.pick_ffmpeg_btn.grid(row=0, column=3, sticky="e")
 
-        self.lang_label = ttk.Label(top, text=tr("lang_label"))
-        self.lang_label.grid(row=0, column=4, sticky="e", padx=(12, 4))
-        self.lang_var = tk.StringVar(value=LANGUAGE_LABELS.get(get_language(), "简体中文"))
-        self.lang_combo = ttk.Combobox(
+        self.path_var = tk.StringVar(value=tr("no_chart_selected"))
+        self.path_label = ttk.Label(top, textvariable=self.path_var)
+        self.path_label.grid(row=0, column=1, sticky="ew", padx=10)
+
+        self.ffmpeg_warn_btn = tk.Button(
             top,
-            textvariable=self.lang_var,
-            state="readonly",
-            width=10,
-            values=[label for _code, label in SUPPORTED_LANGUAGES],
+            text=tr("ffmpeg_warn_badge"),
+            fg=ERROR_RED,
+            bg="#fff3cd",
+            activeforeground=ERROR_RED,
+            activebackground="#ffe69c",
+            relief="groove",
+            borderwidth=1,
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            command=self.open_settings_dialog,
         )
-        self.lang_combo.grid(row=0, column=5, sticky="e")
-        self.lang_combo.bind("<<ComboboxSelected>>", self._on_language_selected)
+        self.ffmpeg_warn_btn.grid(row=0, column=2, sticky="e", padx=(0, 6))
+        self.ffmpeg_warn_btn.grid_remove()
+
+        self.config_btn = ttk.Button(
+            top, text=tr("config_btn"), command=self.open_settings_dialog
+        )
+        self.config_btn.grid(row=0, column=3, sticky="e", ipadx=8, ipady=3)
 
         # --- health check summary ---
         self.health = ttk.LabelFrame(root, text=tr("health_frame_title"), padding=6)
@@ -360,37 +737,79 @@ class App:
         )
         self.only_used_chk.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        self.left_list = tk.Listbox(
-            self.left_frame, selectmode=tk.EXTENDED, exportselection=False, activestyle="dotbox"
+        # 4-column ttk.Treeview: ID | Filename | Count | Target
+        self.left_tree = ttk.Treeview(
+            self.left_frame,
+            columns=("id", "filename", "count", "target"),
+            show="headings",
+            selectmode="extended",
         )
-        scroll = ttk.Scrollbar(self.left_frame, orient="vertical", command=self.left_list.yview)
-        xscroll = ttk.Scrollbar(self.left_frame, orient="horizontal", command=self.left_list.xview)
-        self.left_list.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
-        self.left_list.grid(row=1, column=0, sticky="nsew")
+        s = self._dpi_scale
+        self.left_tree.column("id", width=int(58 * s), minwidth=44, stretch=False, anchor="w")
+        self.left_tree.column("filename", width=int(240 * s), minwidth=110, stretch=True, anchor="w")
+        self.left_tree.column("count", width=int(54 * s), minwidth=44, stretch=False, anchor="e")
+        self.left_tree.column("target", width=int(78 * s), minwidth=58, stretch=False, anchor="w")
+        self._apply_tree_headings()
+
+        self.left_tree.tag_configure("assigned", foreground=GRAY_FOREGROUND)
+        self.left_tree.tag_configure("missing", foreground=ERROR_RED)
+
+        scroll = ttk.Scrollbar(self.left_frame, orient="vertical", command=self.left_tree.yview)
+        xscroll = ttk.Scrollbar(self.left_frame, orient="horizontal", command=self.left_tree.xview)
+        self.left_tree.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
+        self.left_tree.grid(row=1, column=0, sticky="nsew")
         scroll.grid(row=1, column=1, sticky="ns")
         xscroll.grid(row=2, column=0, sticky="ew")
-        self.left_list.bind("<Button-1>", self._on_left_click)
-        self.left_list.bind("<KeyPress-Up>", self._on_left_arrow_press)
-        self.left_list.bind("<KeyPress-Down>", self._on_left_arrow_press)
-        self.left_list.bind("<KeyRelease-Up>", self._on_left_arrow_release)
-        self.left_list.bind("<KeyRelease-Down>", self._on_left_arrow_release)
-        self.left_list.bind(
+
+        self.left_tree.bind("<FocusIn>", lambda _e: self._set_focus_side("left"))
+        self.left_tree.bind("<Button-1>", self._on_left_click)
+        self.left_tree.bind("<KeyPress-Up>", self._on_left_arrow_press)
+        self.left_tree.bind("<KeyPress-Down>", self._on_left_arrow_press)
+        self.left_tree.bind("<KeyRelease-Up>", self._on_left_arrow_release)
+        self.left_tree.bind("<KeyRelease-Down>", self._on_left_arrow_release)
+        self.left_tree.bind(
             "<Double-Button-1>",
             lambda _e: (None if self.auto_preview_var.get() else self.preview_from_left(), "break")[1],
         )
-        self.left_list.bind("<space>", lambda _e: (self.preview_from_left(), "break")[1])
+        self.left_tree.bind("<space>", lambda _e: (self.preview_from_left(), "break")[1])
 
-        pv = ttk.Frame(self.left_frame)
-        pv.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.stop_btn = ttk.Button(pv, text=tr("stop_btn"), command=self.player.stop)
-        self.stop_btn.pack(side="left")
+        # Bottom-left 2-row controls
+        pv_container = ttk.Frame(self.left_frame)
+        pv_container.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+        pv_row1 = ttk.Frame(pv_container)
+        pv_row1.pack(fill="x", anchor="w")
+        self.play_btn = ttk.Button(pv_row1, text=tr("play_btn"), command=self.on_preview_button)
+        self.play_btn.pack(side="left")
+        self.stop_btn = ttk.Button(pv_row1, text=tr("stop_btn"), command=self.player.stop)
+        self.stop_btn.pack(side="left", padx=(4, 0))
         self.auto_preview_var = tk.BooleanVar(value=True)
         self.auto_preview_chk = ttk.Checkbutton(
-            pv, text=tr("auto_preview_chk"), variable=self.auto_preview_var
+            pv_row1, text=tr("auto_preview_chk"), variable=self.auto_preview_var
         )
-        self.auto_preview_chk.pack(side="left", padx=8)
+        self.auto_preview_chk.pack(side="left", padx=(8, 0))
+        self._auto_preview_tip = _Tooltip(
+            self.auto_preview_chk, lambda: tr("auto_preview_tooltip")
+        )
+        self.swap_lr_chk = ttk.Checkbutton(
+            pv_row1,
+            text=tr("swap_lr_chk"),
+            variable=self.swap_lr_var,
+            command=self._on_swap_lr_toggled,
+        )
+        self.swap_lr_chk.pack(side="left", padx=(8, 0))
+
+        pv_row2 = ttk.Frame(pv_container)
+        pv_row2.pack(fill="x", anchor="w", pady=(3, 0))
         self.left_count_var = tk.StringVar(value="")
-        ttk.Label(pv, textvariable=self.left_count_var).pack(side="right")
+        self.left_count_label = ttk.Label(pv_row2, textvariable=self.left_count_var, foreground="#444444")
+        self.left_count_label.pack(side="left")
+
+    def _apply_tree_headings(self) -> None:
+        self.left_tree.heading("id", text=tr("col_id"), anchor="w")
+        self.left_tree.heading("filename", text=tr("col_filename"), anchor="w")
+        self.left_tree.heading("count", text=tr("col_count"), anchor="e")
+        self.left_tree.heading("target", text=tr("col_target"), anchor="w")
 
     def _build_center(self, parent: ttk.Frame) -> None:
         center = ttk.Frame(parent, padding=(8, 0))
@@ -432,7 +851,6 @@ class App:
         self.right_frame.columnconfigure(0, weight=1)
         self.right_frame.rowconfigure(2, weight=1)
 
-        # Top control row inside right panel: "单独定义 LBD" checkbox (default unchecked)
         right_opts = ttk.Frame(self.right_frame)
         right_opts.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         self.separate_lbd_var = tk.BooleanVar(value=False)
@@ -444,7 +862,6 @@ class App:
         )
         self.separate_lbd_chk.pack(side="left")
 
-        # Multi-row grid button switcher (3 rows × 5 columns)
         self.tab_grid_frame = ttk.Frame(self.right_frame)
         self.tab_grid_frame.grid(row=1, column=0, sticky="ew", pady=(0, 4))
         for col_idx in range(TAB_GRID_COLUMNS):
@@ -463,7 +880,6 @@ class App:
             )
             self.tab_buttons[spec.tab_id] = btn
 
-        # Shared panel container below the button grid
         self.panel_container = ttk.Frame(self.right_frame)
         self.panel_container.grid(row=2, column=0, sticky="nsew")
         self.panel_container.columnconfigure(0, weight=1)
@@ -508,45 +924,88 @@ class App:
             command=self.on_export,
             state="disabled",
         )
-        self.export_btn.grid(row=0, column=3, rowspan=2, padx=(12, 0), ipadx=14, ipady=6)
+        self.export_btn.grid(row=0, column=3, rowspan=3, padx=(12, 0), ipadx=14, ipady=8)
 
-        opts = ttk.Frame(self.export_frame)
-        opts.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        opts1 = ttk.Frame(self.export_frame)
+        opts1.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         self.utf8_var = tk.BooleanVar(value=False)
-        self.utf8_chk = ttk.Checkbutton(opts, text=tr("utf8_chk"), variable=self.utf8_var)
+        self.utf8_chk = ttk.Checkbutton(opts1, text=tr("utf8_chk"), variable=self.utf8_var)
         self.utf8_chk.pack(side="left")
         self.ogg_var = tk.BooleanVar(value=False)
-        self.ogg_chk = ttk.Checkbutton(opts, text=tr("transcode_ogg_chk"), variable=self.ogg_var)
+        self.ogg_chk = ttk.Checkbutton(opts1, text=tr("transcode_ogg_chk"), variable=self.ogg_var)
         self.ogg_chk.pack(side="left", padx=12)
-        self.dlevel_label = ttk.Label(opts, text=tr("dlevel_label"))
+        self.dlevel_label = ttk.Label(opts1, text=tr("dlevel_label"))
         self.dlevel_label.pack(side="left", padx=(12, 2))
         self.dlevel_var = tk.StringVar(value="50")
-        ttk.Entry(opts, textvariable=self.dlevel_var, width=6).pack(side="left")
+        ttk.Entry(opts1, textvariable=self.dlevel_var, width=6).pack(side="left")
 
-        # Initialize progressbar in determinate mode with value=0 so no green block is shown at rest
+        opts2 = ttk.Frame(self.export_frame)
+        opts2.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        self.image_mode_label = ttk.Label(opts2, text=tr("image_mode_label"))
+        self.image_mode_label.pack(side="left")
+        self._image_mode_key = IMAGE_MODE_KEEP
+        self.image_mode_var = tk.StringVar()
+        self.image_mode_combo = ttk.Combobox(
+            opts2,
+            textvariable=self.image_mode_var,
+            state="readonly",
+            width=36,
+        )
+        self.image_mode_combo.pack(side="left", padx=(4, 14))
+        self.image_mode_combo.bind("<<ComboboxSelected>>", self._on_image_mode_selected)
+        self._refresh_image_mode_combo()
+
+        self.export_bga_var = tk.BooleanVar(value=False)
+        self.export_bga_chk = ttk.Checkbutton(
+            opts2, text=tr("export_bga_chk"), variable=self.export_bga_var
+        )
+        self.export_bga_chk.pack(side="left")
+
         self.progress = ttk.Progressbar(
             self.export_frame, mode="determinate", maximum=100, value=0
         )
-        self.progress.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self.progress.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         self.open_out_btn = ttk.Button(
             self.export_frame,
             text=tr("open_output_btn"),
             command=self.open_output_folder,
             state="disabled",
         )
-        self.open_out_btn.grid(row=0, column=4, rowspan=2, padx=(8, 0))
+        self.open_out_btn.grid(row=0, column=4, rowspan=3, padx=(8, 0))
 
-    # ---------------------------------------------------- language preferences
-    def _on_language_selected(self, _event: Any = None) -> None:
-        selected_label = self.lang_var.get()
-        lang_code = LABEL_TO_LANGUAGE.get(selected_label, "zh_CN")
-        self.change_language(lang_code)
+    def _image_mode_labels(self) -> List[str]:
+        return [
+            tr("image_mode_keep"),
+            tr("image_mode_resize"),
+            tr("image_mode_none"),
+        ]
 
+    def _refresh_image_mode_combo(self) -> None:
+        labels = self._image_mode_labels()
+        self.image_mode_combo.configure(values=labels)
+        try:
+            idx = _IMAGE_MODES_ORDER.index(self._image_mode_key)
+        except ValueError:
+            idx = 0
+        self.image_mode_combo.current(idx)
+
+    def _on_image_mode_selected(self, _event: Any = None) -> None:
+        idx = self.image_mode_combo.current()
+        if 0 <= idx < len(_IMAGE_MODES_ORDER):
+            self._image_mode_key = _IMAGE_MODES_ORDER[idx]
+
+    def selected_image_mode(self) -> str:
+        return self._image_mode_key
+
+    def _on_swap_lr_toggled(self) -> None:
+        if self._persist_settings:
+            save_app_settings({"swap_lr": bool(self.swap_lr_var.get())}, self.config_path)
+
+    # ---------------------------------------------------- settings & i18n
     def change_language(self, lang_code: str) -> None:
         norm = set_language(lang_code)
-        self.lang_var.set(LANGUAGE_LABELS.get(norm, "简体中文"))
-        if self._persist_lang:
-            save_language_preference(norm, self.config_path)
+        if self._persist_settings:
+            save_app_settings({"language": norm}, self.config_path)
         self.apply_language()
 
     def apply_language(self) -> None:
@@ -554,8 +1013,8 @@ class App:
         self.open_btn.configure(text=tr("open_bms_btn"))
         if self.chart is None:
             self.path_var.set(tr("no_chart_selected"))
-        self.pick_ffmpeg_btn.configure(text=tr("pick_ffmpeg_btn"))
-        self.lang_label.configure(text=tr("lang_label"))
+        self.config_btn.configure(text=tr("config_btn"))
+        self.ffmpeg_warn_btn.configure(text=tr("ffmpeg_warn_badge"))
         self._update_ffmpeg_ui()
 
         self.health.configure(text=tr("health_frame_title"))
@@ -565,8 +1024,11 @@ class App:
         self.search_label.configure(text=tr("search_label"))
         self.clear_search_btn.configure(text=tr("clear_search_btn"))
         self.only_used_chk.configure(text=tr("only_used_chk"))
+        self._apply_tree_headings()
+        self.play_btn.configure(text=tr("play_btn"))
         self.stop_btn.configure(text=tr("stop_btn"))
         self.auto_preview_chk.configure(text=tr("auto_preview_chk"))
+        self.swap_lr_chk.configure(text=tr("swap_lr_chk"))
 
         self.add_btn.configure(text=tr("add_btn"))
         self.remove_btn.configure(text=tr("remove_btn"))
@@ -588,6 +1050,9 @@ class App:
         self.utf8_chk.configure(text=tr("utf8_chk"))
         self.ogg_chk.configure(text=tr("transcode_ogg_chk"))
         self.dlevel_label.configure(text=tr("dlevel_label"))
+        self.image_mode_label.configure(text=tr("image_mode_label"))
+        self._refresh_image_mode_combo()
+        self.export_bga_chk.configure(text=tr("export_bga_chk"))
 
         self.refresh_all()
         if not self._busy:
@@ -602,6 +1067,213 @@ class App:
                         events=len(self.chart.events),
                     )
                 )
+
+    def _validate_ffmpeg_candidate(self, path_or_cmd: Optional[str]) -> str:
+        resolved = find_ffmpeg(path_or_cmd)
+        flags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if sys.platform == "win32"
+            else 0
+        )
+        proc = subprocess.run(
+            [resolved, "-version"],
+            capture_output=True,
+            timeout=20,
+            creationflags=flags,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError("ffmpeg -version exited with non-zero code")
+        return resolved
+
+    def open_settings_dialog(self) -> None:
+        """Open unified Settings modal dialog (language, ffmpeg, auto-bind, #WAV labels)."""
+        top = tk.Toplevel(self.root)
+        top.title(tr("settings_title"))
+        top.transient(self.root)
+        top.grab_set()
+        top.resizable(False, False)
+
+        container = ttk.Frame(top, padding=12)
+        container.pack(fill="both", expand=True)
+
+        # 1. Language
+        lang_sec = ttk.LabelFrame(container, text=tr("settings_general_section"), padding=8)
+        lang_sec.pack(fill="x", pady=(0, 8))
+        lang_var = tk.StringVar(value=LANGUAGE_LABELS.get(get_language(), "简体中文"))
+        ttk.Label(lang_sec, text=tr("lang_label")).pack(side="left", padx=(0, 6))
+        lang_combo = ttk.Combobox(
+            lang_sec,
+            textvariable=lang_var,
+            state="readonly",
+            width=16,
+            values=[label for _code, label in SUPPORTED_LANGUAGES],
+        )
+        lang_combo.pack(side="left")
+
+        # 2. ffmpeg status & locator + winget guide
+        ff_sec = ttk.LabelFrame(container, text=tr("settings_ffmpeg_section"), padding=8)
+        ff_sec.pack(fill="x", pady=(0, 8))
+        draft_explicit: List[Optional[str]] = [self.ffmpeg_explicit]
+        draft_detected: List[Optional[str]] = [self.ffmpeg_path]
+
+        ff_status_var = tk.StringVar()
+        ff_status_lbl = ttk.Label(ff_sec, textvariable=ff_status_var, wraplength=540, justify="left")
+        ff_status_lbl.pack(anchor="w")
+
+        def _refresh_ff_dialog() -> None:
+            if draft_detected[0]:
+                ff_status_var.set(tr("ffmpeg_ok", path=draft_detected[0]))
+                ff_status_lbl.configure(foreground=OK_GREEN)
+            else:
+                ff_status_var.set(tr("ffmpeg_missing_short"))
+                ff_status_lbl.configure(foreground=ERROR_RED)
+
+        _refresh_ff_dialog()
+
+        ff_btns = ttk.Frame(ff_sec)
+        ff_btns.pack(fill="x", pady=(6, 4))
+
+        def _dlg_pick_ffmpeg() -> None:
+            path = filedialog.askopenfilename(
+                parent=top,
+                title=tr("pick_ffmpeg_btn"),
+                filetypes=[("ffmpeg.exe", "*.exe"), (tr("filetypes_all"), "*.*")],
+            )
+            if not path:
+                return
+            try:
+                resolved = self._validate_ffmpeg_candidate(path)
+            except Exception as exc:
+                messagebox.showerror(
+                    tr("dialog_ffmpeg_invalid_title"),
+                    tr("dialog_ffmpeg_invalid_body", exc=exc),
+                    parent=top,
+                )
+                return
+            draft_explicit[0] = path
+            draft_detected[0] = resolved
+            _refresh_ff_dialog()
+
+        def _dlg_redetect_ffmpeg() -> None:
+            draft_explicit[0] = None
+            try:
+                draft_detected[0] = find_ffmpeg(None)
+            except FfmpegNotFoundError:
+                draft_detected[0] = None
+            _refresh_ff_dialog()
+
+        ttk.Button(ff_btns, text=tr("pick_ffmpeg_btn"), command=_dlg_pick_ffmpeg).pack(side="left")
+        ttk.Button(
+            ff_btns, text=tr("settings_ffmpeg_redetect_btn"), command=_dlg_redetect_ffmpeg
+        ).pack(side="left", padx=6)
+
+        ttk.Label(ff_sec, text=tr("settings_ffmpeg_hint"), foreground="#555555").pack(
+            anchor="w", pady=(4, 2)
+        )
+        cmd_row = ttk.Frame(ff_sec)
+        cmd_row.pack(fill="x")
+        cmd_var = tk.StringVar(value=tr("settings_winget_cmd"))
+        cmd_entry = ttk.Entry(cmd_row, textvariable=cmd_var, state="readonly")
+        cmd_entry.pack(side="left", fill="x", expand=True)
+
+        def _copy_winget() -> None:
+            try:
+                top.clipboard_clear()
+                top.clipboard_append(cmd_var.get())
+                self.set_status(tr("settings_copied_cmd"))
+            except Exception:
+                pass
+
+        ttk.Button(cmd_row, text=tr("settings_copy_cmd_btn"), command=_copy_winget).pack(
+            side="left", padx=(6, 0)
+        )
+
+        # 3. Default bound chip strategy
+        bind_sec = ttk.LabelFrame(container, text=tr("settings_bind_section"), padding=8)
+        bind_sec.pack(fill="x", pady=(0, 8))
+        bind_mode_var = tk.StringVar(value=self.model.default_bind_mode)
+        ttk.Radiobutton(
+            bind_sec, text=tr("settings_bind_auto"), value="auto", variable=bind_mode_var
+        ).pack(anchor="w")
+        ttk.Radiobutton(
+            bind_sec, text=tr("settings_bind_manual"), value="manual", variable=bind_mode_var
+        ).pack(anchor="w", pady=(2, 0))
+
+        # 4. #WAVxx inline labels editor
+        lbl_sec = ttk.LabelFrame(container, text=tr("settings_labels_section"), padding=8)
+        lbl_sec.pack(fill="x", pady=(0, 10))
+        label_vars: Dict[str, tk.StringVar] = {}
+        cols_per_row = 4
+        for idx, key in enumerate(WAV_LABEL_KEYS):
+            r, c = divmod(idx, cols_per_row)
+            display_name = "BGM" if key == "BGM" else TAB_SPEC_MAP[TabId(key)].label
+            ttk.Label(lbl_sec, text=f"{display_name}:", width=9, anchor="e").grid(
+                row=r, column=c * 2, sticky="e", padx=(2, 2), pady=2
+            )
+            var = tk.StringVar(value=self.wav_labels.get(key, DEFAULT_WAV_LABELS[key]))
+            label_vars[key] = var
+            ttk.Entry(lbl_sec, textvariable=var, width=9).grid(
+                row=r, column=c * 2 + 1, sticky="w", padx=(0, 8), pady=2
+            )
+
+        def _reset_labels() -> None:
+            for key, default_val in DEFAULT_WAV_LABELS.items():
+                if key in label_vars:
+                    label_vars[key].set(default_val)
+
+        ttk.Button(lbl_sec, text=tr("settings_reset_labels_btn"), command=_reset_labels).grid(
+            row=(len(WAV_LABEL_KEYS) + cols_per_row - 1) // cols_per_row,
+            column=0,
+            columnspan=cols_per_row * 2,
+            sticky="e",
+            pady=(6, 0),
+        )
+
+        # Bottom Save / Cancel
+        btns = ttk.Frame(container)
+        btns.pack(fill="x")
+
+        def _save_and_close() -> None:
+            chosen_label = lang_var.get()
+            new_lang = LABEL_TO_LANGUAGE.get(chosen_label, get_language())
+            new_bind_mode = bind_mode_var.get()
+            new_labels = {
+                k: sanitize_wav_label(label_vars[k].get())
+                for k in WAV_LABEL_KEYS
+            }
+
+            self.ffmpeg_explicit = draft_explicit[0]
+            self.detect_ffmpeg()
+            self.wav_labels = new_labels
+
+            prev_mode = self.model.default_bind_mode
+            self.model.set_default_bind_mode(new_bind_mode)
+
+            if self._persist_settings:
+                save_app_settings(
+                    {
+                        "language": new_lang,
+                        "ffmpeg_path": self.ffmpeg_explicit,
+                        "default_bind_mode": self.model.default_bind_mode,
+                        "wav_labels": new_labels,
+                        "swap_lr": bool(self.swap_lr_var.get()),
+                    },
+                    self.config_path,
+                )
+
+            if new_lang != get_language():
+                self.change_language(new_lang)
+            elif prev_mode != self.model.default_bind_mode:
+                self.refresh_all()
+
+            if self.ffmpeg_path:
+                self.set_status(tr("status_ffmpeg_enabled", path=self.ffmpeg_path))
+            top.destroy()
+
+        ttk.Button(btns, text=tr("settings_cancel_btn"), command=top.destroy).pack(side="right")
+        ttk.Button(btns, text=tr("settings_save_btn"), command=_save_and_close).pack(
+            side="right", padx=(0, 8)
+        )
 
     # ------------------------------------------------- right tab grid switcher
     def visible_tabs(self) -> List[TabId]:
@@ -659,16 +1331,72 @@ class App:
         self._update_tab_button_styles()
 
     def _on_toggle_separate_lbd(self) -> None:
+        before = self.model.snapshot()
         enabled = bool(self.separate_lbd_var.get())
         self.model.set_separate_lbd(enabled)
         if not enabled and self._active_tab == TabId.LBD:
             self._active_tab = TabId.LP
+        self._commit_undo(before)
         self._rebuild_tab_grid()
         self.select_tab(self._active_tab)
         self.refresh_left()
         self.refresh_tab(TabId.LBD)
 
+    # ------------------------------------------------------------- undo/redo
+    def _update_dirty_flag(self) -> None:
+        if self.chart is None:
+            self.dirty = False
+        else:
+            self.dirty = self.model.snapshot() != self._clean_snapshot
+
+    def _commit_undo(self, before_snapshot: Dict[str, Any]) -> None:
+        after_snapshot = self.model.snapshot()
+        if after_snapshot == before_snapshot:
+            return
+        self._undo_stack.append(before_snapshot)
+        if len(self._undo_stack) > MAX_UNDO_HISTORY:
+            del self._undo_stack[0]
+        self._redo_stack.clear()
+        self._update_dirty_flag()
+
+    def on_undo(self) -> bool:
+        if self._busy or not self._undo_stack:
+            return False
+        self._redo_stack.append(self.model.snapshot())
+        snap = self._undo_stack.pop()
+        self.model.restore(snap)
+        if self.separate_lbd_var.get() != self.model.separate_lbd:
+            self.separate_lbd_var.set(self.model.separate_lbd)
+            if not self.model.separate_lbd and self._active_tab == TabId.LBD:
+                self._active_tab = TabId.LP
+            self._rebuild_tab_grid()
+            self.select_tab(self._active_tab)
+        self.refresh_all()
+        self._update_dirty_flag()
+        self.set_status(tr("status_undone"))
+        return True
+
+    def on_redo(self) -> bool:
+        if self._busy or not self._redo_stack:
+            return False
+        self._undo_stack.append(self.model.snapshot())
+        snap = self._redo_stack.pop()
+        self.model.restore(snap)
+        if self.separate_lbd_var.get() != self.model.separate_lbd:
+            self.separate_lbd_var.set(self.model.separate_lbd)
+            if not self.model.separate_lbd and self._active_tab == TabId.LBD:
+                self._active_tab = TabId.LP
+            self._rebuild_tab_grid()
+            self.select_tab(self._active_tab)
+        self.refresh_all()
+        self._update_dirty_flag()
+        self.set_status(tr("status_redone"))
+        return True
+
     # ----------------------------------------------------------------- helpers
+    def _set_focus_side(self, side: str) -> None:
+        self._last_focus_side = side
+
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
 
@@ -739,12 +1467,10 @@ class App:
 
     def _update_ffmpeg_ui(self) -> None:
         if self.ffmpeg_path:
-            self.ffmpeg_var.set(tr("ffmpeg_ok", path=self.ffmpeg_path))
-            self.ffmpeg_label.configure(foreground=OK_GREEN)
+            self.ffmpeg_warn_btn.grid_remove()
             self.ogg_chk.configure(state="normal")
         else:
-            self.ffmpeg_var.set(tr("ffmpeg_missing_short"))
-            self.ffmpeg_label.configure(foreground=ERROR_RED)
+            self.ffmpeg_warn_btn.grid()
             self.ogg_var.set(False)
             self.ogg_chk.configure(state="disabled")
 
@@ -767,20 +1493,7 @@ class App:
         if not path:
             return
         try:
-            resolved = find_ffmpeg(path)
-            flags = (
-                getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                if sys.platform == "win32"
-                else 0
-            )
-            proc = subprocess.run(
-                [resolved, "-version"],
-                capture_output=True,
-                timeout=20,
-                creationflags=flags,
-            )
-            if proc.returncode != 0:
-                raise RuntimeError("ffmpeg -version exited with non-zero code")
+            self._validate_ffmpeg_candidate(path)
         except Exception as exc:
             messagebox.showerror(
                 tr("dialog_ffmpeg_invalid_title"),
@@ -789,6 +1502,8 @@ class App:
             )
             return
         self.ffmpeg_explicit = path
+        if self._persist_settings:
+            save_app_settings({"ffmpeg_path": path}, self.config_path)
         self.detect_ffmpeg()
         self.set_status(tr("status_ffmpeg_enabled", path=self.ffmpeg_path))
 
@@ -854,6 +1569,12 @@ class App:
         self.model.set_chart(chart)
         self.model.clear()
         self.model.set_separate_lbd(self.separate_lbd_var.get())
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._clean_snapshot = self.model.snapshot()
+        self.dirty = False
+
+        self._update_window_title()
         self.path_var.set(str(chart.source_path))
         self._render_health(chart)
         self.out_var.set(str(suggest_output_dir(chart.source_path)))
@@ -947,14 +1668,14 @@ class App:
         self._update_tab_button_styles()
 
     def refresh_left(self) -> None:
-        keep = {
-            self._left_ids[i]
-            for i in self.left_list.curselection()
-            if i < len(self._left_ids)
-        }
-        yview = self.left_list.yview()[0]
-        self.left_list.delete(0, tk.END)
+        keep_sel = set(self.left_tree.selection())
+        keep_focus = self.left_tree.focus()
+        yview = self.left_tree.yview()[0]
+        children = self.left_tree.get_children("")
+        if children:
+            self.left_tree.delete(*children)
         self._left_ids = []
+        self._left_id_set = set()
         if self.chart is None:
             self.left_count_var.set("")
             return
@@ -962,6 +1683,7 @@ class App:
         self._left_ids = filter_wav_ids(
             self.chart, self.search_var.get(), self.only_used_var.get()
         )
+        self._left_id_set = set(self._left_ids)
         rep_to_group, _wid_to_rep = wav_physical_groups(self.chart)
         all_groups = list(rep_to_group.keys())
         assigned_groups = 0
@@ -969,26 +1691,30 @@ class App:
             if owner.get(rep_id) is not None:
                 assigned_groups += 1
 
-        for idx, wid in enumerate(self._left_ids):
+        to_select: List[str] = []
+        for wid in self._left_ids:
             tab = owner.get(wid)
-            self.left_list.insert(
-                tk.END,
-                format_wav_row(
-                    self.chart.wavs[wid],
-                    tab,
-                    chart=self.chart,
-                    group_ids=rep_to_group.get(wid),
-                ),
+            entry = self.chart.wavs[wid]
+            values = format_wav_tree_values(
+                entry,
+                tab,
+                chart=self.chart,
+                group_ids=rep_to_group.get(wid),
             )
             if tab is not None:
-                self.left_list.itemconfig(
-                    idx,
-                    foreground=GRAY_FOREGROUND,
-                    selectforeground=GRAY_FOREGROUND,
-                )
-            if wid in keep:
-                self.left_list.selection_set(idx)
-        self.left_list.yview_moveto(yview)
+                tags: tuple[str, ...] = ("assigned",)
+            elif not entry.exists:
+                tags = ("missing",)
+            else:
+                tags = ()
+            self.left_tree.insert("", tk.END, iid=wid, values=values, tags=tags)
+            if wid in keep_sel:
+                to_select.append(wid)
+        if to_select:
+            self.left_tree.selection_set(tuple(to_select))
+        if keep_focus and keep_focus in self._left_id_set:
+            self.left_tree.focus(keep_focus)
+        self.left_tree.yview_moveto(yview)
         self.left_count_var.set(
             tr(
                 "left_count_summary",
@@ -999,11 +1725,7 @@ class App:
         )
 
     def selected_left_ids(self) -> List[str]:
-        return [
-            self._left_ids[i]
-            for i in self.left_list.curselection()
-            if i < len(self._left_ids)
-        ]
+        return [iid for iid in self.left_tree.selection() if iid in self._left_id_set]
 
     # ----------------------------------------------------------------- shuttle
     def on_add(self) -> None:
@@ -1014,7 +1736,9 @@ class App:
             self.set_status(tr("status_select_left_first"))
             return
         tab = self.active_tab()
+        before = self.model.snapshot()
         added, skipped = self.model.assign(tab, ids, chart=self.chart)
+        self._commit_undo(before)
         self.refresh_left()
         self.refresh_tab(tab)
         msg = tr("status_added_to_tab", added=len(added), tab=tab_label(tab))
@@ -1030,7 +1754,9 @@ class App:
         if not ids:
             self.set_status(tr("status_select_right_first"))
             return
+        before = self.model.snapshot()
         removed = self.model.remove(tab, ids, chart=self.chart)
+        self._commit_undo(before)
         self.refresh_left()
         self.refresh_tab(tab)
         self.set_status(
@@ -1044,7 +1770,9 @@ class App:
             tr("dialog_clear_title"), tr("dialog_clear_body"), parent=self.root
         ):
             return
+        before = self.model.snapshot()
         self.model.clear()
+        self._commit_undo(before)
         self.refresh_all()
         self.set_status(tr("status_cleared_all"))
 
@@ -1053,7 +1781,6 @@ class App:
         if self.chart is None:
             return
         assigned = self.model.assigned_ids
-        # Guess on representative IDs (and expand to sibling physical-file IDs via model.assign)
         rep_ids = filter_wav_ids(self.chart, "", False)
         candidates = [
             (wid, self.chart.wavs[wid].resolved_name)
@@ -1062,7 +1789,6 @@ class App:
         ]
         guesses = guess_assignments(candidates)
         if not self.separate_lbd_var.get() and TabId.LBD in guesses:
-            # When LBD is hidden, route guessed LBD samples into BD
             lbd_ids = guesses.pop(TabId.LBD)
             guesses.setdefault(TabId.BD, []).extend(lbd_ids)
         total = sum(len(v) for v in guesses.values())
@@ -1082,8 +1808,10 @@ class App:
                 parent=self.root,
             ):
                 return
+        before = self.model.snapshot()
         for tab, ids in guesses.items():
             self.model.assign(tab, ids, chart=self.chart)
+        self._commit_undo(before)
         self.refresh_all()
         self.set_status(tr("status_guessed", total=total))
 
@@ -1105,12 +1833,15 @@ class App:
             self._play_wav_id(self._left_ids[idx])
 
     def _on_left_click(self, event: Any) -> None:
+        self._set_focus_side("left")
         if not self._left_ids:
             return
-        idx = self.left_list.nearest(event.y)
-        self._on_left_click_index(idx)
+        row_iid = self.left_tree.identify_row(event.y)
+        if row_iid and row_iid in self._left_id_set and self.auto_preview_var.get() and self.chart is not None:
+            self._play_wav_id(row_iid)
 
     def _on_left_arrow_press(self, _event: Any = None) -> None:
+        self._set_focus_side("left")
         if not self.auto_preview_var.get() or self.chart is None or not self._left_ids:
             return
         try:
@@ -1121,66 +1852,68 @@ class App:
     def _on_left_arrow_after_keypress(self) -> None:
         if not self.auto_preview_var.get() or self.chart is None or not self._left_ids:
             return
-        try:
-            active_idx = int(self.left_list.index(tk.ACTIVE))
-        except Exception:
-            return
-        if 0 <= active_idx < len(self._left_ids):
-            self._arrow_previewed_idx = active_idx
-            self._play_wav_id(self._left_ids[active_idx])
+        focus_iid = self.left_tree.focus()
+        if focus_iid and focus_iid in self._left_id_set:
+            self._arrow_previewed_iid = focus_iid
+            self._play_wav_id(focus_iid)
 
     def _on_left_arrow_release(self, _event: Any = None) -> None:
         if not self.auto_preview_var.get() or self.chart is None or not self._left_ids:
             return
-        try:
-            active_idx = int(self.left_list.index(tk.ACTIVE))
-        except Exception:
+        focus_iid = self.left_tree.focus()
+        if self._arrow_previewed_iid == focus_iid:
+            self._arrow_previewed_iid = None
             return
-        if self._arrow_previewed_idx == active_idx:
-            self._arrow_previewed_idx = None
-            return
-        self._arrow_previewed_idx = None
-        if 0 <= active_idx < len(self._left_ids):
-            self._play_wav_id(self._left_ids[active_idx])
+        self._arrow_previewed_iid = None
+        if focus_iid and focus_iid in self._left_id_set:
+            self._play_wav_id(focus_iid)
 
     def _on_left_arrow_key(self, _event: Any = None) -> None:
         if not self.auto_preview_var.get() or self.chart is None or not self._left_ids:
             return
-        try:
-            active_idx = int(self.left_list.index(tk.ACTIVE))
-        except Exception:
-            return
-        if 0 <= active_idx < len(self._left_ids):
-            self._play_wav_id(self._left_ids[active_idx])
+        focus_iid = self.left_tree.focus()
+        if focus_iid and focus_iid in self._left_id_set:
+            self._play_wav_id(focus_iid)
 
     def preview_from_left(self) -> bool:
+        self._set_focus_side("left")
         if not self._left_ids:
             self._play_wav_id(None)
             return True
-        cur = self.left_list.curselection()
-        try:
-            active_idx = int(self.left_list.index(tk.ACTIVE))
-        except Exception:
-            active_idx = -1
-        if active_idx in cur and 0 <= active_idx < len(self._left_ids):
-            self._play_wav_id(self._left_ids[active_idx])
+        sel = self.selected_left_ids()
+        focus_iid = self.left_tree.focus()
+        if focus_iid and focus_iid in sel:
+            self._play_wav_id(focus_iid)
         else:
-            ids = self.selected_left_ids()
-            self._play_wav_id(ids[0] if ids else None)
+            self._play_wav_id(sel[0] if sel else None)
         return True
 
     def preview_from_tab(self, tab: TabId) -> bool:
+        self._set_focus_side("right")
         ids = self.panels[tab].selected_ids()
+        if not ids:
+            panel = self.panels[tab]
+            try:
+                active_idx = int(panel.listbox.index(tk.ACTIVE))
+            except Exception:
+                active_idx = -1
+            if 0 <= active_idx < len(panel.ids):
+                ids = [panel.ids[active_idx]]
         self._play_wav_id(ids[0] if ids else None)
         return True
 
     def on_preview_button(self) -> None:
-        ids = self.selected_left_ids()
-        if not ids:
-            ids = (
-                self.panels[self.active_tab()].selected_ids() if self.chart else []
-            )
-        self._play_wav_id(ids[0] if ids else None)
+        left_ids = self.selected_left_ids()
+        right_ids = (
+            self.panels[self.active_tab()].selected_ids() if self.chart else []
+        )
+        if self._last_focus_side == "right" and right_ids:
+            self._play_wav_id(right_ids[0])
+            return
+        if left_ids:
+            self._play_wav_id(left_ids[0])
+            return
+        self._play_wav_id(right_ids[0] if right_ids else None)
 
     # --------------------------------------------------------- mapping JSON I/O
     def on_save_mapping(self) -> None:
@@ -1216,6 +1949,7 @@ class App:
         )
         if not path:
             return
+        before = self.model.snapshot()
         try:
             notes = load_mapping_json(self.model, path, self.chart)
         except Exception as exc:
@@ -1225,6 +1959,7 @@ class App:
                 parent=self.root,
             )
             return
+        self._commit_undo(before)
         if self.model.separate_lbd != self.separate_lbd_var.get():
             self.separate_lbd_var.set(self.model.separate_lbd)
             self._rebuild_tab_grid()
@@ -1299,6 +2034,10 @@ class App:
             dlevel=dlevel,
             ffmpeg_path=self.ffmpeg_path,
             render_bgm=render_bgm,
+            swap_lr=bool(self.swap_lr_var.get()),
+            wav_labels=dict(self.wav_labels),
+            image_mode=self.selected_image_mode(),
+            export_bga=bool(self.export_bga_var.get()),
         )
         mapping = self.model.to_mapping_config()
         self.set_busy(True)
@@ -1313,6 +2052,8 @@ class App:
     def _on_export_done(self, result: core.ConversionResult) -> None:
         self.set_busy(False, completed=True)
         self.last_output_dir = result.output_dir
+        self._clean_snapshot = self.model.snapshot()
+        self.dirty = False
         self.open_out_btn.configure(state="normal")
         self.set_status(tr("status_export_done", path=result.dtx_path))
         self.show_text_dialog(
@@ -1349,7 +2090,15 @@ class App:
 
     # ------------------------------------------------------------------- close
     def on_close(self) -> None:
+        if self.dirty and self.startup_dialogs:
+            if not messagebox.askyesno(
+                tr("dialog_dirty_close_title"),
+                tr("dialog_dirty_close_body"),
+                parent=self.root,
+            ):
+                return
         try:
+            self._teardown_windows_drag_drop()
             self.player.shutdown()
             if self._poll_id is not None:
                 try:

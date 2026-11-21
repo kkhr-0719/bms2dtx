@@ -31,6 +31,43 @@ SUPPORTED_AUDIO_EXTENSIONS: Tuple[str, ...] = (
     ".wma",
 )
 
+AUTO_PREVIEW_AUDIO_EXTENSIONS: Tuple[str, ...] = (
+    ".ogg",
+    ".wav",
+    ".mp3",
+    ".flac",
+)
+
+SUPPORTED_IMAGE_EXTENSIONS: Tuple[str, ...] = (
+    ".bmp",
+    ".png",
+    ".jpg",
+    ".jpeg",
+)
+
+SUPPORTED_VIDEO_EXTENSIONS: Tuple[str, ...] = (
+    ".mp4",
+    ".avi",
+    ".wmv",
+    ".mpg",
+    ".mpeg",
+    ".webm",
+    ".mkv",
+)
+
+SUPPORTED_BGA_EXTENSIONS: Tuple[str, ...] = (
+    SUPPORTED_IMAGE_EXTENSIONS + SUPPORTED_VIDEO_EXTENSIONS
+)
+
+IMAGE_MODE_KEEP = "keep"
+IMAGE_MODE_RESIZE = "resize"
+IMAGE_MODE_NONE = "none"
+VALID_IMAGE_MODES: Tuple[str, ...] = (
+    IMAGE_MODE_KEEP,
+    IMAGE_MODE_RESIZE,
+    IMAGE_MODE_NONE,
+)
+
 
 class TabId(str, Enum):
     """The 15 mapping tabs defined in AGENTS.md, in canonical WAV renumbering order."""
@@ -144,6 +181,38 @@ BMS_MINE_CHANNELS: frozenset[str] = frozenset(
     {f"D{i}" for i in range(1, 10)} | {f"E{i}" for i in range(1, 10)}
 )
 BMS_BGA_CHANNELS: frozenset[str] = frozenset({"04", "06", "07", "0A"})
+
+DEFAULT_WAV_LABELS: Dict[str, str] = {
+    "BGM": "BGM",
+    TabId.LC.value: "LC",
+    TabId.HH_CLOSE.value: "HHC",
+    TabId.HH_OPEN.value: "HHO",
+    TabId.LP.value: "LP",
+    TabId.LBD.value: "LBD",
+    TabId.SD.value: "SD",
+    TabId.HT.value: "HT",
+    TabId.BD.value: "BD",
+    TabId.LT.value: "LT",
+    TabId.FT.value: "FT",
+    TabId.CY.value: "CY",
+    TabId.RD.value: "RD",
+    TabId.OTHER.value: "Other",
+    TabId.GUITAR.value: "GT",
+    TabId.BASS.value: "BS",
+}
+
+WAV_LABEL_KEYS: Tuple[str, ...] = ("BGM",) + tuple(spec.tab_id.value for spec in TAB_SPECS)
+
+
+def sanitize_wav_label(label: str) -> str:
+    """Strip newlines, tabs, and semicolons from a custom #WAVxx inline label."""
+    return (
+        label.replace("\r", " ")
+        .replace("\n", " ")
+        .replace("\t", " ")
+        .replace(";", "")
+        .strip()
+    )
 
 
 def int_to_base36(value: int) -> str:

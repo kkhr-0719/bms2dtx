@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .constants import (
+    DEFAULT_WAV_LABELS,
     DTX_MAX_BPM_SLOTS,
     LEGAL_DTX_NOTE_CHANNELS,
     MAX_MEASURE_DIVISIONS,
     QUANTIZE_FALLBACK_DIVISIONS,
     format_dtx_number,
     int_to_base36,
+    sanitize_wav_label,
 )
 from .encoding import encode_dtx_text
 from .models import BmsChart, BpmChange, ConversionWarning, PlacedDtxNote
@@ -163,11 +165,18 @@ def generate_dtx_text(
     dlevel: Optional[int] = None,
     comment: Optional[str] = None,
     preview_filename: Optional[str] = None,
+    stagefile_filename: Optional[str] = None,
+    preimage_filename: Optional[str] = None,
+    background_filename: Optional[str] = None,
+    dtx_wav_labels: Optional[Dict[str, str]] = None,
+    wav_labels: Optional[Dict[str, str]] = None,
+    bga_headers: Optional[Sequence[Tuple[str, str, str]]] = None,
+    bga_placed_events: Optional[Sequence[Tuple[int, Fraction, str, str]]] = None,
 ) -> Tuple[str, List[ConversionWarning]]:
     """Generate complete DTX text and enforce Rule 6 channel safety invariants."""
     warnings: List[ConversionWarning] = []
 
-    # Compute effective max measure across chart, notes, and BPM changes
+    # Compute effective max measure across chart, notes, BPM changes, and BGA events
     max_measure = chart.max_measure
     for note in placed_notes:
         if note.measure > max_measure:
@@ -175,6 +184,10 @@ def generate_dtx_text(
     for bc in chart.bpm_changes:
         if bc.measure > max_measure:
             max_measure = bc.measure
+    if bga_placed_events:
+        for bm, _bpos, _bch, _bid in bga_placed_events:
+            if bm > max_measure:
+                max_measure = bm
     if max_measure > 999:
         warnings.append(
             ConversionWarning(
@@ -189,14 +202,11 @@ def generate_dtx_text(
     # Resolve header fields
     title = _sanitize_header_value(chart.full_title)
     artist = _sanitize_header_value(chart.artist)
+    genre_clean = _sanitize_header_value(chart.genre) if chart.genre.strip() else ""
     if comment is not None:
         final_comment = _sanitize_header_value(comment)
     else:
-        genre_clean = chart.genre.strip()
-        if genre_clean:
-            final_comment = _sanitize_header_value(f"{genre_clean} (w/ bms2dtx)")
-        else:
-            final_comment = "prepped w/ bms2dtx"
+        final_comment = "via bms2dtx"
 
     if dlevel is not None:
         final_dlevel = max(1, min(999, int(dlevel)))
@@ -210,22 +220,62 @@ def generate_dtx_text(
         "",
         f"#TITLE: {title}",
         f"#ARTIST: {artist}",
-        f"#COMMENT: {final_comment}",
-        f"#BPM: {format_dtx_number(chart.initial_bpm)}",
-        f"#DLEVEL: {final_dlevel}",
     ]
+    if genre_clean:
+        lines.append(f"#GENRE: {genre_clean}")
+    lines.extend(
+        [
+            f"#COMMENT: {final_comment}",
+            f"#BPM: {format_dtx_number(chart.initial_bpm)}",
+            f"#DLEVEL: {final_dlevel}",
+        ]
+    )
     if preview_filename:
         dtx_preview = preview_filename.replace("/", "\\").replace(";", "_")
         lines.append(f"#PREVIEW: {dtx_preview}")
+    if preimage_filename:
+        dtx_preimage = preimage_filename.replace("/", "\\").replace(";", "_")
+        lines.append(f"#PREIMAGE: {dtx_preimage}")
+    if stagefile_filename:
+        dtx_stagefile = stagefile_filename.replace("/", "\\").replace(";", "_")
+        lines.append(f"#STAGEFILE: {dtx_stagefile}")
+    if background_filename:
+        dtx_background = background_filename.replace("/", "\\").replace(";", "_")
+        lines.append(f"#BACKGROUND: {dtx_background}")
     lines.append("")
+
+    merged_label_table = dict(DEFAULT_WAV_LABELS)
+    if wav_labels:
+        for k, v in wav_labels.items():
+            merged_label_table[str(k).strip().upper()] = str(v)
 
     # WAV declarations + #BGMWAV (Toggle=OFF reserves 01 for bgm.ogg)
     for wid, filename in dtx_wav_table:
         dtx_filename = filename.replace("/", "\\").replace(";", "_")
-        lines.append(f"#WAV{wid}: {dtx_filename}")
+        raw_label = ""
+        if dtx_wav_labels is not None and wid in dtx_wav_labels:
+            label_key_or_val = dtx_wav_labels[wid]
+            raw_label = merged_label_table.get(
+                str(label_key_or_val).strip().upper(), label_key_or_val
+            )
+        elif not effective_toggle_on and wid == "01":
+            raw_label = merged_label_table.get("BGM", DEFAULT_WAV_LABELS["BGM"])
+        clean_label = sanitize_wav_label(raw_label) if raw_label else ""
+        if clean_label:
+            lines.append(f"#WAV{wid}: {dtx_filename}\t;{clean_label}")
+        else:
+            lines.append(f"#WAV{wid}: {dtx_filename}")
         if not effective_toggle_on and wid == "01":
             lines.append("#BGMWAV: 01")
     lines.append("")
+
+    if bga_headers:
+        for tag_kind, bga_wid, bga_fname in bga_headers:
+            dtx_bga_fname = bga_fname.replace("/", "\\").replace(";", "_")
+            tag_up = tag_kind.upper()
+            if tag_up in ("BMP", "AVI"):
+                lines.append(f"#{tag_up}{bga_wid}: {dtx_bga_fname}")
+        lines.append("")
 
     # Sticky channel 02 (measure length) declarations
     sticky_lengths = _build_sticky_measure_lengths(chart.measure_lengths, max_measure)
@@ -277,8 +327,19 @@ def generate_dtx_text(
             continue
         slot_dict[note.pos] = note.dtx_wav_id
 
+    bga_by_measure: Dict[int, Dict[str, Dict[Fraction, str]]] = defaultdict(
+        lambda: defaultdict(dict)
+    )
+    if bga_placed_events:
+        for bm, bpos, bch, bid in bga_placed_events:
+            bga_by_measure[bm][bch.upper()].setdefault(bpos, bid)
+
     # Emit main measure data sorted by measure index
-    all_data_measures = sorted(set(notes_by_measure.keys()) | set(bpm_by_measure.keys()))
+    all_data_measures = sorted(
+        set(notes_by_measure.keys())
+        | set(bpm_by_measure.keys())
+        | set(bga_by_measure.keys())
+    )
     channel_01_count_per_measure: Dict[int, int] = defaultdict(int)
 
     for m in all_data_measures:
@@ -298,6 +359,12 @@ def generate_dtx_text(
             payload = _serialize_measure_channel(m, ch, ch_map[ch], warnings)
             if payload:
                 lines.append(f"#{m:03d}{ch}: {payload}")
+
+        bga_map = bga_by_measure.get(m, {})
+        for bch in sorted(bga_map.keys()):
+            payload = _serialize_measure_channel(m, bch, bga_map[bch], warnings)
+            if payload:
+                lines.append(f"#{m:03d}{bch}: {payload}")
 
     if lane_bind_lines:
         lines.append("")

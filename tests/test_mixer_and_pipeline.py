@@ -638,7 +638,8 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertTrue((out1 / "SubDir" / "Pre_Song.ogg").is_file())
             dtx1 = res1.dtx_path.read_text(encoding="cp932")
             self.assertIn(r"#PREVIEW: SubDir\Pre_Song.ogg", dtx1)
-            self.assertIn("#COMMENT: Electronic (w/ bms2dtx)", dtx1)
+            self.assertIn("#GENRE: Electronic", dtx1)
+            self.assertIn("#COMMENT: via bms2dtx", dtx1)
 
             # 2. #PREVIEW name collision with retained slice -> disambiguated with _1
             src2 = root / "prev_src2"
@@ -660,7 +661,7 @@ class TestMixerAndPipeline(unittest.TestCase):
             dtx2 = res2.dtx_path.read_text(encoding="cp932")
             self.assertIn("#WAV02: kick.wav", dtx2)
             self.assertIn("#PREVIEW: kick_1.wav", dtx2)
-            self.assertIn("#COMMENT: prepped w/ bms2dtx", dtx2)
+            self.assertIn("#COMMENT: via bms2dtx", dtx2)
 
             # 3. Missing #PREVIEW file -> records MISSING_PREVIEW_FILE warning, never crashes
             src3 = root / "prev_src3"
@@ -732,6 +733,273 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertIn("#00112: 0202", dtx)
             self.assertIn("#00166: 0303", dtx)
             self.assertIn("#DTXC_LANEBINDEDCHIP: 04 02 00", dtx)
+
+    def test_auto_preview_tier2_fallback_and_excludes_wavxx(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Case A: preview.ogg (WAV01 -> excluded!), preview_alpha.ogg, preview_beta.mp3 -> picks preview_alpha.ogg
+            s1 = root / "s1"
+            s1.mkdir()
+            _write_sine_wav(s1 / "preview.wav", 120.0, 0.05)  # referenced by #WAV01 (must be excluded)
+            (s1 / "preview_beta.mp3").write_bytes(b"mp3data")
+            (s1 / "preview_alpha.ogg").write_bytes(b"oggdata")
+            b1 = s1 / "c1.bms"
+            b1.write_text("#TITLE AutoPrev1\n#BPM 120\n#WAV01 preview.wav\n#00101:01\n", encoding="utf-8")
+            res1 = convert_bms(
+                b1,
+                ConversionOptions(output_dir=root / "o1", render_bgm=False),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            self.assertEqual(res1.preview_path.name, "preview_alpha.ogg")
+            dtx1 = res1.dtx_path.read_text(encoding="cp932")
+            self.assertIn("#PREVIEW: preview_alpha.ogg", dtx1)
+
+            # Case B: exact preview.ogg preferred over preview_long.wav
+            s2 = root / "s2"
+            s2.mkdir()
+            _write_sine_wav(s2 / "kick.wav", 120.0, 0.05)
+            _write_sine_wav(s2 / "preview_long.wav", 220.0, 0.05)
+            (s2 / "preview.ogg").write_bytes(b"oggexact")
+            b2 = s2 / "c2.bms"
+            b2.write_text("#TITLE AutoPrev2\n#BPM 120\n#WAV01 kick.wav\n#00101:01\n", encoding="utf-8")
+            res2 = convert_bms(
+                b2,
+                ConversionOptions(output_dir=root / "o2", render_bgm=False),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            self.assertEqual(res2.preview_path.name, "preview.ogg")
+            self.assertIn("#PREVIEW: preview.ogg", res2.dtx_path.read_text(encoding="cp932"))
+
+    def test_swap_lr_bgm_slices_preview_and_mono_untouched(self) -> None:
+        ffmpeg_exe = find_ffmpeg()
+
+        def _write_pan_wav(path: Path, left_amp: float, right_amp: float, dur: float = 0.12) -> None:
+            sr = 44100
+            n = int(round(dur * sr))
+            with wave.open(str(path), "wb") as wf:
+                wf.setnchannels(2)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                frames = bytearray()
+                for i in range(n):
+                    s = math.sin(2.0 * math.pi * 440.0 * i / sr)
+                    lv = int(max(-32767, min(32767, round(32767.0 * left_amp * s))))
+                    rv = int(max(-32767, min(32767, round(32767.0 * right_amp * s))))
+                    frames.extend(struct.pack("<hh", lv, rv))
+                wf.writeframes(bytes(frames))
+
+        def _write_mono_wav(path: Path, amp: float = 0.5, dur: float = 0.08) -> None:
+            sr = 44100
+            n = int(round(dur * sr))
+            with wave.open(str(path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                frames = bytearray()
+                for i in range(n):
+                    v = int(max(-32767, min(32767, round(32767.0 * amp * math.sin(2.0 * math.pi * 330.0 * i / sr)))))
+                    frames.extend(struct.pack("<h", v))
+                wf.writeframes(bytes(frames))
+
+        def _lr_rms(raw_f32: bytes) -> tuple[float, float]:
+            vals = struct.unpack(f"<{len(raw_f32) // 4}f", raw_f32)
+            ls = vals[0::2]
+            rs = vals[1::2]
+            return (
+                math.sqrt(sum(v * v for v in ls) / max(1, len(ls))),
+                math.sqrt(sum(v * v for v in rs) / max(1, len(rs))),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            # Stereo slice (Left only), Mono slice, Stereo BGM unmapped (Left only), Stereo preview (Left only)
+            _write_pan_wav(src / "stereo_sd.wav", 0.7, 0.0)
+            _write_mono_wav(src / "mono_bd.wav", 0.5)
+            _write_pan_wav(src / "bgm_left.wav", 0.7, 0.0)
+            _write_pan_wav(src / "prev_left.wav", 0.7, 0.0)
+            bms = src / "swap.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE SwapLR",
+                        "#BPM 120",
+                        "#PREVIEW prev_left.wav",
+                        "#WAV01 stereo_sd.wav",
+                        "#WAV02 mono_bd.wav",
+                        "#WAV03 bgm_left.wav",
+                        "#00001:010203",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            mono_bytes_before = (src / "mono_bd.wav").read_bytes()
+
+            out = root / "out"
+            res = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out, swap_lr=True, render_bgm=True),
+                mapping=MappingConfig(tab_wavs={TabId.SD: ["01"], TabId.BD: ["02"]}),
+            )
+            # 1. bgm.ogg L/R swapped: Left silent, Right loud
+            bgm_f32, err = _decode_audio_to_f32_bytes(res.bgm_path, ffmpeg_exe, 44100)
+            self.assertIsNone(err)
+            l_bgm, r_bgm = _lr_rms(bgm_f32)
+            self.assertLess(l_bgm, 0.005)
+            self.assertGreater(r_bgm, 0.1)
+
+            # 2. Pure-python bgm mixer also swaps L/R identically
+            chart = parse_bms(bms)
+            out_py = root / "bgm_py.ogg"
+            render_bgm_ogg(chart, [e for e in chart.events if e.wav_id == "03"], out_py, use_numpy=False, swap_lr=True)
+            py_f32, _ = _decode_audio_to_f32_bytes(out_py, ffmpeg_exe, 44100)
+            l_py, r_py = _lr_rms(py_f32)
+            self.assertLess(l_py, 0.005)
+            self.assertGreater(r_py, 0.1)
+
+            # 3. Retained stereo slice swapped L -> R
+            sd_f32, _ = _decode_audio_to_f32_bytes(out / "stereo_sd.wav", ffmpeg_exe, 44100)
+            l_sd, r_sd = _lr_rms(sd_f32)
+            self.assertLess(l_sd, 0.005)
+            self.assertGreater(r_sd, 0.3)
+
+            # 4. Retained mono slice is byte-for-byte plain copied (untouched)
+            self.assertEqual((out / "mono_bd.wav").read_bytes(), mono_bytes_before)
+
+            # 5. Preview stereo swapped L -> R
+            pv_f32, _ = _decode_audio_to_f32_bytes(out / "prev_left.wav", ffmpeg_exe, 44100)
+            l_pv, r_pv = _lr_rms(pv_f32)
+            self.assertLess(l_pv, 0.005)
+            self.assertGreater(r_pv, 0.3)
+
+    def test_images_three_modes_and_experimental_bga_passthrough(self) -> None:
+        import json as _json
+
+        ffmpeg_exe = find_ffmpeg()
+        ffprobe_exe = str(Path(ffmpeg_exe).with_name("ffprobe.exe" if ffmpeg_exe.lower().endswith(".exe") else "ffprobe"))
+        _no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        def _probe_dims(img_path: Path) -> tuple[int, int]:
+            proc = subprocess.run(
+                [
+                    ffprobe_exe,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "json",
+                    str(img_path),
+                ],
+                capture_output=True,
+                text=True,
+                creationflags=_no_win,
+                check=True,
+            )
+            st = _json.loads(proc.stdout)["streams"][0]
+            return int(st["width"]), int(st["height"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            _write_sine_wav(src / "bd.wav", 100.0, 0.06)
+
+            # Generate real 1280x720 stage.png, 800x600 back.jpg, 320x240 bga_img.png, and 320x240 bga_vid.mp4 via ffmpeg
+            subprocess.run(
+                [ffmpeg_exe, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=1280x720", "-frames:v", "1", str(src / "stage.png")],
+                creationflags=_no_win,
+                check=True,
+            )
+            subprocess.run(
+                [ffmpeg_exe, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=green:s=800x600", "-frames:v", "1", str(src / "back.jpg")],
+                creationflags=_no_win,
+                check=True,
+            )
+            subprocess.run(
+                [ffmpeg_exe, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=320x240", "-frames:v", "1", str(src / "bga_img.png")],
+                creationflags=_no_win,
+                check=True,
+            )
+            subprocess.run(
+                [ffmpeg_exe, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=yellow:s=320x240:d=0.2", "-pix_fmt", "yuv420p", str(src / "bga_vid.mp4")],
+                creationflags=_no_win,
+                check=True,
+            )
+
+            bms = src / "img_bga.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE ImgBga",
+                        "#BPM 120",
+                        "#STAGEFILE stage.png",
+                        "#BACKBMP back.jpg",
+                        "#WAV01 bd.wav",
+                        "#BMP01 bga_img.png",
+                        "#BMP02 bga_vid.mp4",
+                        "#00101:01",
+                        "#00104:0102",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            # Mode 1: keep + export_bga=False (default)
+            out_keep = root / "out_keep"
+            res_keep = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_keep, render_bgm=False, image_mode="keep", export_bga=False),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            self.assertEqual((out_keep / "stage.png").read_bytes(), (src / "stage.png").read_bytes())
+            self.assertEqual((out_keep / "back.jpg").read_bytes(), (src / "back.jpg").read_bytes())
+            dtx_keep = res_keep.dtx_path.read_text(encoding="cp932")
+            self.assertIn("#PREIMAGE: stage.png", dtx_keep)
+            self.assertIn("#STAGEFILE: stage.png", dtx_keep)
+            self.assertIn("#BACKGROUND: back.jpg", dtx_keep)
+            self.assertNotIn("#BMP01:", dtx_keep)
+            self.assertNotIn("#AVI", dtx_keep)
+
+            # Mode 2: resize (204x269 #PREIMAGE + 640x480 #STAGEFILE & #BACKGROUND) + export_bga=True
+            out_resize = root / "out_resize"
+            res_resize = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_resize, render_bgm=False, image_mode="resize", export_bga=True),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            self.assertEqual(_probe_dims(res_resize.preimage_path), (204, 269))
+            self.assertEqual(_probe_dims(res_resize.stagefile_path), (640, 480))
+            self.assertEqual(_probe_dims(res_resize.background_path), (640, 480))
+            self.assertTrue((out_resize / "bga_img.png").is_file())
+            self.assertTrue((out_resize / "bga_vid.mp4").is_file())
+            dtx_resize = res_resize.dtx_path.read_text(encoding="cp932")
+            self.assertIn("#PREIMAGE: stage_preimage.png", dtx_resize)
+            self.assertIn("#STAGEFILE: stage.png", dtx_resize)
+            self.assertIn("#BACKGROUND: back.jpg", dtx_resize)
+            self.assertIn("#BMP01: bga_img.png", dtx_resize)
+            self.assertIn("#AVI02: bga_vid.mp4", dtx_resize)
+            self.assertIn("#00104: 01", dtx_resize)
+            self.assertIn("#00154: 0002", dtx_resize)
+
+            # Mode 3: none
+            out_none = root / "out_none"
+            res_none = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_none, render_bgm=False, image_mode="none", export_bga=False),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            self.assertIsNone(res_none.stagefile_path)
+            self.assertIsNone(res_none.background_path)
+            self.assertFalse((out_none / "stage.png").exists())
+            self.assertFalse((out_none / "back.jpg").exists())
+            dtx_none = res_none.dtx_path.read_text(encoding="cp932")
+            self.assertNotIn("#STAGEFILE:", dtx_none)
+            self.assertNotIn("#PREIMAGE:", dtx_none)
+            self.assertNotIn("#BACKGROUND:", dtx_none)
 
 
 if __name__ == "__main__":
