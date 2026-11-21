@@ -2,9 +2,19 @@
 
 from .constants import (
     ALL_SE_CHANNELS,
+    AUTO_LP_CHIP_AUTO,
+    AUTO_LP_CHIP_EMPTY_ZZ,
+    AUTO_LP_CHIP_NONE,
+    AUTO_LP_RESONANT_WAV_ID,
+    AUTO_LP_SILENT_FILENAME,
+    AUTO_LP_SILENT_WAV_ID,
+    AUTO_LP_THRESHOLD_MS,
+    AUTO_LP_THRESHOLD_NOTE,
+    AUTO_LP_VALID_DENOMINATORS,
     DEFAULT_WAV_LABELS,
     DRUM_DTX_CHANNELS,
     DRUM_TABS,
+    DTX_MAX_BASE36_ID,
     DTX_MAX_MAPPED_SLOTS_TOGGLE_OFF,
     DTX_MAX_WAV_SLOTS,
     DTXC_BIND_LANES,
@@ -13,6 +23,8 @@ from .constants import (
     IMAGE_MODE_RESIZE,
     LEGAL_DTX_NOTE_CHANNELS,
     MAX_SLICER_COLUMNS,
+    PROJECT_MAPPING_FILENAME,
+    RESERVED_AUTO_LP_WAV_IDS,
     SLICER_SE_CHANNELS,
     TAB_ORDER,
     TAB_SPEC_MAP,
@@ -24,7 +36,13 @@ from .constants import (
     int_to_base36,
     sanitize_wav_label,
 )
-from .converter import batch_convert, convert_bms, inspect_bms
+from .converter import (
+    batch_convert,
+    build_project_mapping_dict,
+    convert_bms,
+    inspect_bms,
+    parse_auto_lp_config,
+)
 from .dtx_writer import generate_dtx_text, write_dtx_file
 from .encoding import decode_bms_bytes, encode_dtx_text, read_bms_text
 from .mapping import (
@@ -41,8 +59,10 @@ from .mixer import (
     materialize_preview_audio,
     materialize_retained_slices,
     render_bgm_ogg,
+    write_silent_wav,
 )
 from .models import (
+    AutoLpConfig,
     BgaEvent,
     BmsChart,
     BpmChange,
@@ -67,6 +87,16 @@ from .timeline import Timeline, build_timeline_for_chart
 
 __all__ = [
     "ALL_SE_CHANNELS",
+    "AUTO_LP_CHIP_AUTO",
+    "AUTO_LP_CHIP_EMPTY_ZZ",
+    "AUTO_LP_CHIP_NONE",
+    "AUTO_LP_RESONANT_WAV_ID",
+    "AUTO_LP_SILENT_FILENAME",
+    "AUTO_LP_SILENT_WAV_ID",
+    "AUTO_LP_THRESHOLD_MS",
+    "AUTO_LP_THRESHOLD_NOTE",
+    "AUTO_LP_VALID_DENOMINATORS",
+    "AutoLpConfig",
     "BgaEvent",
     "BmsChart",
     "BpmChange",
@@ -76,6 +106,7 @@ __all__ = [
     "DEFAULT_WAV_LABELS",
     "DRUM_DTX_CHANNELS",
     "DRUM_TABS",
+    "DTX_MAX_BASE36_ID",
     "DTX_MAX_MAPPED_SLOTS_TOGGLE_OFF",
     "DTX_MAX_WAV_SLOTS",
     "DTXC_BIND_LANES",
@@ -89,7 +120,9 @@ __all__ = [
     "MappingPlan",
     "MixStats",
     "NoteEvent",
+    "PROJECT_MAPPING_FILENAME",
     "PlacedDtxNote",
+    "RESERVED_AUTO_LP_WAV_IDS",
     "SLICER_SE_CHANNELS",
     "SeAllocationResult",
     "SeCollapseOverflowError",
@@ -107,6 +140,7 @@ __all__ = [
     "base62_to_int",
     "batch_convert",
     "build_mapping_plan",
+    "build_project_mapping_dict",
     "build_timeline_for_chart",
     "convert_bms",
     "decode_bms_bytes",
@@ -120,10 +154,12 @@ __all__ = [
     "materialize_images",
     "materialize_preview_audio",
     "materialize_retained_slices",
+    "parse_auto_lp_config",
     "parse_bms",
     "read_bms_text",
     "render_bgm_ogg",
     "resolve_auto_bind_wav_id",
     "sanitize_wav_label",
     "write_dtx_file",
+    "write_silent_wav",
 ]

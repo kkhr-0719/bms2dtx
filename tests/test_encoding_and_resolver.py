@@ -21,7 +21,7 @@ class TestEncodingRules(unittest.TestCase):
 
     def test_utf8_with_bom_does_not_mojibake_as_cp932(self) -> None:
         # Pure ASCII + UTF-8 BOM: naive cp932 decode would corrupt EF BB BF!
-        text = "#TITLE Ivory\n#ARTIST Snowyplane\n"
+        text = "#TITLE SampleTitle\n#ARTIST SampleArtist\n"
         raw = text.encode("utf-8-sig")
         decoded, enc, warnings = decode_bms_bytes(raw)
         self.assertEqual(enc, "utf-8-sig")

@@ -1125,3 +1125,20 @@ def materialize_bga(
         bga_placed_events.append((ev.measure, ev.pos, dtx_ch, dtx_bid))
 
     return bga_headers, bga_placed_events, copied_files, warnings
+
+
+def write_silent_wav(
+    output_path: Path,
+    *,
+    duration_ms: float = 10.0,
+    sample_rate: int = 44100,
+) -> Path:
+    """Write a minimal silent 16-bit mono PCM WAV file (e.g. for #WAVZZ ghost LP slot)."""
+    n_frames = max(1, int(round(sample_rate * duration_ms / 1000.0)))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * n_frames)
+    return output_path

@@ -37,7 +37,6 @@ Thumbs.db
 *.dtx
 *.def
 
-# Local copyrighted test song directories
-Ivory \[Snowyplane\]/
-Caravan \[APPROVED DTX\]/
+# Local copyrighted test song directories (generic pattern, no private pack names)
+*\[*\]*/
 desktop.ini

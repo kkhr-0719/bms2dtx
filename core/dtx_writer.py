@@ -170,6 +170,7 @@ def generate_dtx_text(
     background_filename: Optional[str] = None,
     dtx_wav_labels: Optional[Dict[str, str]] = None,
     wav_labels: Optional[Dict[str, str]] = None,
+    wav_volumes: Optional[Dict[str, int]] = None,
     bga_headers: Optional[Sequence[Tuple[str, str, str]]] = None,
     bga_placed_events: Optional[Sequence[Tuple[int, Fraction, str, str]]] = None,
 ) -> Tuple[str, List[ConversionWarning]]:
@@ -265,6 +266,9 @@ def generate_dtx_text(
             lines.append(f"#WAV{wid}: {dtx_filename}\t;{clean_label}")
         else:
             lines.append(f"#WAV{wid}: {dtx_filename}")
+        if wav_volumes and wid in wav_volumes:
+            vol_val = max(0, min(100, int(wav_volumes[wid])))
+            lines.append(f"#VOLUME{wid}: {vol_val}")
         if not effective_toggle_on and wid == "01":
             lines.append("#BGMWAV: 01")
     lines.append("")

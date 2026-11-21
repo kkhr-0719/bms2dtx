@@ -12,8 +12,25 @@ BASE62_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _BASE36_MAP: Dict[str, int] = {ch: idx for idx, ch in enumerate(BASE36_DIGITS)}
 _BASE62_MAP: Dict[str, int] = {ch: idx for idx, ch in enumerate(BASE62_DIGITS)}
 
-DTX_MAX_WAV_SLOTS = 1295  # 01..ZZ
-DTX_MAX_MAPPED_SLOTS_TOGGLE_OFF = 1294  # 02..ZZ (01 reserved for bgm.ogg)
+AUTO_LP_RESONANT_WAV_ID = "ZY"
+AUTO_LP_SILENT_WAV_ID = "ZZ"
+AUTO_LP_SILENT_FILENAME = "_silent_zz.wav"
+RESERVED_AUTO_LP_WAV_IDS: frozenset[str] = frozenset(
+    {AUTO_LP_RESONANT_WAV_ID, AUTO_LP_SILENT_WAV_ID}
+)
+
+AUTO_LP_CHIP_NONE = "none"
+AUTO_LP_CHIP_AUTO = "auto"
+AUTO_LP_CHIP_EMPTY_ZZ = "empty_zz"
+AUTO_LP_THRESHOLD_NOTE = "note_value"
+AUTO_LP_THRESHOLD_MS = "ms"
+AUTO_LP_VALID_DENOMINATORS: Tuple[int, ...] = (2, 4, 6, 8, 12, 16)
+
+PROJECT_MAPPING_FILENAME = "__bms2dtx.json"
+
+DTX_MAX_BASE36_ID = 1295  # 00..ZZ
+DTX_MAX_WAV_SLOTS = 1293  # 01..ZX (ZY & ZZ permanently reserved for Auto-LP)
+DTX_MAX_MAPPED_SLOTS_TOGGLE_OFF = 1292  # 02..ZX (01 reserved for bgm.ogg; ZY/ZZ reserved)
 DTX_MAX_BPM_SLOTS = 1295  # #BPM01..#BPMZZ
 MAX_SLICER_COLUMNS = 5
 MAX_MEASURE_DIVISIONS = 1536
@@ -217,7 +234,7 @@ def sanitize_wav_label(label: str) -> str:
 
 def int_to_base36(value: int) -> str:
     """Convert an integer in [0, 1295] to a 2-character uppercase base-36 ID."""
-    if not (0 <= value <= DTX_MAX_WAV_SLOTS):
+    if not (0 <= value <= DTX_MAX_BASE36_ID):
         raise ValueError(f"Base-36 2-char ID out of range [0, 1295]: {value}")
     hi, lo = divmod(value, 36)
     return BASE36_DIGITS[hi] + BASE36_DIGITS[lo]

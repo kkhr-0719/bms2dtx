@@ -1,4 +1,4 @@
-"""bms2dtx desktop GUI (tkinter / ttk). v1.2.0: Toggle = OFF only."""
+"""bms2dtx desktop GUI (tkinter / ttk). v0.3.0: Toggle = OFF only."""
 
 from __future__ import annotations
 
@@ -17,6 +17,11 @@ import tkinter.font as tkfont
 
 import core
 from core import (
+    AUTO_LP_CHIP_EMPTY_ZZ,
+    AUTO_LP_CHIP_NONE,
+    AUTO_LP_THRESHOLD_MS,
+    AUTO_LP_THRESHOLD_NOTE,
+    AUTO_LP_VALID_DENOMINATORS,
     DEFAULT_WAV_LABELS,
     IMAGE_MODE_KEEP,
     IMAGE_MODE_NONE,
@@ -40,6 +45,7 @@ from .helpers import (
     AUTO_BIND_SENTINEL,
     GRAY_FOREGROUND,
     AssignmentModel,
+    auto_lp_combobox_values,
     bind_combobox_values,
     build_health_summary,
     build_result_summary,
@@ -55,6 +61,7 @@ from .helpers import (
     parse_dlevel,
     radix_needs_notice,
     save_mapping_json,
+    suggest_load_mapping_location,
     suggest_output_dir,
     tab_has_bind_combobox,
     tab_label,
@@ -106,9 +113,16 @@ def enable_hidpi() -> None:
 class _Tooltip:
     """Lightweight dynamic-text hover tooltip for ttk/tk widgets."""
 
-    def __init__(self, widget: tk.Widget, text_getter: Callable[[], str]) -> None:
+    def __init__(
+        self,
+        widget: tk.Widget,
+        text_getter: Callable[[], str],
+        *,
+        delay_ms: int = 380,
+    ) -> None:
         self._widget = widget
         self._text_getter = text_getter
+        self._delay_ms = max(0, int(delay_ms))
         self._tip_win: Optional[tk.Toplevel] = None
         self._after_id: Optional[str] = None
         widget.bind("<Enter>", self._on_enter, add="+")
@@ -119,7 +133,7 @@ class _Tooltip:
     def _on_enter(self, _event: Any = None) -> None:
         self._cancel()
         try:
-            self._after_id = self._widget.after(380, self._show)
+            self._after_id = self._widget.after(self._delay_ms, self._show)
         except Exception:
             pass
 
@@ -187,6 +201,29 @@ class TabPanel:
         self.combo_var = tk.StringVar(value=get_no_bind_label())
         self._arrow_previewed_idx: Optional[int] = None
 
+        # LP-only Auto-LP dual-row controls
+        self._suppress_auto_lp_sync = False
+        self.auto_lp_mode_note_rb: Optional[ttk.Radiobutton] = None
+        self.auto_lp_mode_ms_rb: Optional[ttk.Radiobutton] = None
+        self.auto_lp_label: Optional[ttk.Label] = None
+        self.auto_lp_combo: Optional[ttk.Combobox] = None
+        self.auto_lp_chip_values: List[str] = [AUTO_LP_CHIP_NONE]
+        self.auto_lp_chip_var = tk.StringVar()
+        self.auto_lp_vol_label: Optional[ttk.Label] = None
+        self.auto_lp_vol_spin: Optional[tk.Spinbox] = None
+        self.auto_lp_vol_var = tk.StringVar(value="50")
+        self.auto_lp_thresh_mode_var = tk.StringVar(value=AUTO_LP_THRESHOLD_NOTE)
+        self.auto_lp_num_var = tk.StringVar(value="1")
+        self.auto_lp_den_var = tk.StringVar(value="4")
+        self.auto_lp_ms_var = tk.StringVar(value="250")
+        self.auto_lp_num_entry: Optional[ttk.Entry] = None
+        self.auto_lp_den_combo: Optional[ttk.Combobox] = None
+        self.auto_lp_ms_entry: Optional[ttk.Entry] = None
+        self._lp_thresh_note_frame: Optional[ttk.Frame] = None
+        self._lp_thresh_ms_frame: Optional[ttk.Frame] = None
+        self._lp_tip_label: Optional[_Tooltip] = None
+        self._lp_tip_combo: Optional[_Tooltip] = None
+
         row = 0
         note = get_tab_note(tab)
         if note is not None:
@@ -195,7 +232,110 @@ class TabPanel:
             )
             self.note_label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
             row += 1
-        if tab_has_bind_combobox(tab):
+        if tab == TabId.LP:
+            # Dual-row compact header for LP Tab:
+            # Row 1: compact Default bind | Threshold mode radios (Note Value vs ms)
+            lp_row1 = ttk.Frame(self.frame)
+            lp_row1.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 3))
+            lp_row1.columnconfigure(1, weight=1)
+            self.bind_label = ttk.Label(lp_row1, text=tr("lp_default_bind_short"))
+            self.bind_label.grid(row=0, column=0, sticky="w", padx=(0, 4))
+            self.combo = ttk.Combobox(
+                lp_row1,
+                textvariable=self.combo_var,
+                state="readonly",
+                values=[get_no_bind_label()],
+                width=18,
+            )
+            self.combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+            self.combo.bind("<<ComboboxSelected>>", self._on_bind_selected)
+
+            self.auto_lp_mode_note_rb = ttk.Radiobutton(
+                lp_row1,
+                text=tr("auto_lp_mode_note"),
+                value=AUTO_LP_THRESHOLD_NOTE,
+                variable=self.auto_lp_thresh_mode_var,
+                command=self._on_auto_lp_changed,
+            )
+            self.auto_lp_mode_note_rb.grid(row=0, column=2, sticky="e")
+            self.auto_lp_mode_ms_rb = ttk.Radiobutton(
+                lp_row1,
+                text=tr("auto_lp_mode_ms"),
+                value=AUTO_LP_THRESHOLD_MS,
+                variable=self.auto_lp_thresh_mode_var,
+                command=self._on_auto_lp_changed,
+            )
+            self.auto_lp_mode_ms_rb.grid(row=0, column=3, sticky="e", padx=(6, 0))
+            row += 1
+
+            # Row 2: Auto-LP chip selector | Vol (0-100) | <= threshold
+            lp_row2 = ttk.Frame(self.frame)
+            lp_row2.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+            lp_row2.columnconfigure(1, weight=1)
+
+            self.auto_lp_label = ttk.Label(lp_row2, text=tr("auto_lp_label"))
+            self.auto_lp_label.grid(row=0, column=0, sticky="w", padx=(0, 4))
+            self.auto_lp_combo = ttk.Combobox(
+                lp_row2,
+                textvariable=self.auto_lp_chip_var,
+                state="readonly",
+                width=14,
+            )
+            self.auto_lp_combo.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+            self.auto_lp_combo.bind("<<ComboboxSelected>>", self._on_auto_lp_changed)
+            self._lp_tip_label = _Tooltip(
+                self.auto_lp_label, lambda: tr("auto_lp_tooltip"), delay_ms=1000
+            )
+            self._lp_tip_combo = _Tooltip(
+                self.auto_lp_combo, lambda: tr("auto_lp_tooltip"), delay_ms=1000
+            )
+
+            self.auto_lp_vol_label = ttk.Label(lp_row2, text=tr("auto_lp_vol_label"))
+            self.auto_lp_vol_label.grid(row=0, column=2, sticky="e", padx=(0, 2))
+            self.auto_lp_vol_spin = tk.Spinbox(
+                lp_row2,
+                from_=0,
+                to=100,
+                width=4,
+                textvariable=self.auto_lp_vol_var,
+                command=self._on_auto_lp_changed,
+            )
+            self.auto_lp_vol_spin.grid(row=0, column=3, sticky="e", padx=(0, 6))
+            self.auto_lp_vol_spin.bind("<FocusOut>", self._on_auto_lp_changed)
+            self.auto_lp_vol_spin.bind("<Return>", self._on_auto_lp_changed)
+
+            self._lp_thresh_note_frame = ttk.Frame(lp_row2)
+            ttk.Label(self._lp_thresh_note_frame, text="<=").pack(side="left", padx=(0, 2))
+            self.auto_lp_num_entry = ttk.Entry(
+                self._lp_thresh_note_frame, textvariable=self.auto_lp_num_var, width=3
+            )
+            self.auto_lp_num_entry.pack(side="left")
+            self.auto_lp_num_entry.bind("<FocusOut>", self._on_auto_lp_changed)
+            self.auto_lp_num_entry.bind("<Return>", self._on_auto_lp_changed)
+            ttk.Label(self._lp_thresh_note_frame, text="/").pack(side="left", padx=2)
+            self.auto_lp_den_combo = ttk.Combobox(
+                self._lp_thresh_note_frame,
+                textvariable=self.auto_lp_den_var,
+                state="readonly",
+                width=3,
+                values=[str(d) for d in AUTO_LP_VALID_DENOMINATORS],
+            )
+            self.auto_lp_den_combo.pack(side="left")
+            self.auto_lp_den_combo.bind("<<ComboboxSelected>>", self._on_auto_lp_changed)
+
+            self._lp_thresh_ms_frame = ttk.Frame(lp_row2)
+            ttk.Label(self._lp_thresh_ms_frame, text="<=").pack(side="left", padx=(0, 2))
+            self.auto_lp_ms_entry = ttk.Entry(
+                self._lp_thresh_ms_frame, textvariable=self.auto_lp_ms_var, width=5
+            )
+            self.auto_lp_ms_entry.pack(side="left")
+            self.auto_lp_ms_entry.bind("<FocusOut>", self._on_auto_lp_changed)
+            self.auto_lp_ms_entry.bind("<Return>", self._on_auto_lp_changed)
+            ttk.Label(self._lp_thresh_ms_frame, text="ms").pack(side="left", padx=(2, 0))
+
+            self._lp_thresh_note_frame.grid(row=0, column=4, sticky="e")
+            row += 1
+        elif tab_has_bind_combobox(tab):
             self.bind_label = ttk.Label(self.frame, text=tr("default_bind_label"))
             self.bind_label.grid(row=row, column=0, columnspan=2, sticky="w")
             row += 1
@@ -297,13 +437,116 @@ class TabPanel:
             tr("status_bind_updated", tab=tab_label(self.tab), wav=wav_label)
         )
 
+    def _on_auto_lp_changed(self, _event: Any = None) -> None:
+        if self.tab != TabId.LP or self._suppress_auto_lp_sync:
+            return
+        self.sync_auto_lp_to_model(push_undo=True)
+        self._refresh_auto_lp_controls()
+
+    def sync_auto_lp_to_model(self, *, push_undo: bool = True) -> None:
+        """Read LP Tab Auto-LP widgets into ``model.auto_lp`` cleanly."""
+        if self.tab != TabId.LP or self.auto_lp_combo is None:
+            return
+        before = self.app.model.snapshot() if push_undo else None
+        alp = self.app.model.auto_lp
+
+        cidx = self.auto_lp_combo.current()
+        if 0 <= cidx < len(self.auto_lp_chip_values):
+            alp.chip_mode = self.auto_lp_chip_values[cidx]
+
+        tmode = self.auto_lp_thresh_mode_var.get()
+        alp.threshold_mode = (
+            AUTO_LP_THRESHOLD_MS if tmode == AUTO_LP_THRESHOLD_MS else AUTO_LP_THRESHOLD_NOTE
+        )
+
+        try:
+            vol = max(0, min(100, int(self.auto_lp_vol_var.get().strip())))
+        except ValueError:
+            vol = alp.volume
+        alp.volume = vol
+
+        try:
+            num = max(1, int(self.auto_lp_num_var.get().strip()))
+        except ValueError:
+            num = alp.note_num
+        alp.note_num = num
+
+        try:
+            den = int(self.auto_lp_den_var.get().strip())
+        except ValueError:
+            den = alp.note_den
+        if den in AUTO_LP_VALID_DENOMINATORS:
+            alp.note_den = den
+
+        try:
+            ms_val = max(0.0, float(self.auto_lp_ms_var.get().strip()))
+        except ValueError:
+            ms_val = alp.threshold_ms
+        alp.threshold_ms = ms_val
+
+        if push_undo and before is not None:
+            self.app._commit_undo(before)
+
+    def _refresh_auto_lp_controls(self) -> None:
+        if self.tab != TabId.LP or self.auto_lp_combo is None:
+            return
+        self._suppress_auto_lp_sync = True
+        try:
+            model = self.app.model
+            chart = self.app.chart
+            alp = model.auto_lp
+
+            options = auto_lp_combobox_values(model, chart)
+            self.auto_lp_chip_values = [val for _lbl, val in options]
+            self.auto_lp_combo.configure(values=[lbl for lbl, _val in options])
+
+            target_idx = 0
+            if alp.chip_mode in self.auto_lp_chip_values:
+                target_idx = self.auto_lp_chip_values.index(alp.chip_mode)
+            else:
+                alp.chip_mode = AUTO_LP_CHIP_NONE
+            self.auto_lp_combo.current(target_idx)
+
+            self.auto_lp_thresh_mode_var.set(alp.threshold_mode)
+            self.auto_lp_vol_var.set(str(alp.volume))
+            self.auto_lp_num_var.set(str(alp.note_num))
+            self.auto_lp_den_var.set(str(alp.note_den))
+            self.auto_lp_ms_var.set(f"{alp.threshold_ms:g}")
+
+            # Disable volume box when chip_mode is None or ZZ: Silent
+            if self.auto_lp_vol_spin is not None:
+                vol_enabled = alp.chip_mode not in (AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_EMPTY_ZZ)
+                self.auto_lp_vol_spin.configure(state="normal" if vol_enabled else "disabled")
+
+            if self._lp_thresh_note_frame is not None and self._lp_thresh_ms_frame is not None:
+                if alp.threshold_mode == AUTO_LP_THRESHOLD_MS:
+                    self._lp_thresh_note_frame.grid_remove()
+                    self._lp_thresh_ms_frame.grid(row=0, column=4, sticky="e")
+                else:
+                    self._lp_thresh_ms_frame.grid_remove()
+                    self._lp_thresh_note_frame.grid(row=0, column=4, sticky="e")
+        finally:
+            self._suppress_auto_lp_sync = False
+
     def update_language_texts(self) -> None:
         if self.note_label is not None:
             note = get_tab_note(self.tab)
             if note is not None:
                 self.note_label.configure(text=note)
         if self.bind_label is not None:
-            self.bind_label.configure(text=tr("default_bind_label"))
+            self.bind_label.configure(
+                text=tr("lp_default_bind_short") if self.tab == TabId.LP else tr("default_bind_label")
+            )
+        if self.tab == TabId.LP:
+            if self.auto_lp_label is not None:
+                self.auto_lp_label.configure(text=tr("auto_lp_label"))
+            if self.auto_lp_vol_label is not None:
+                self.auto_lp_vol_label.configure(text=tr("auto_lp_vol_label"))
+            if self.auto_lp_mode_note_rb is not None:
+                self.auto_lp_mode_note_rb.configure(text=tr("auto_lp_mode_note"))
+            if self.auto_lp_mode_ms_rb is not None:
+                self.auto_lp_mode_ms_rb.configure(text=tr("auto_lp_mode_ms"))
+            self._refresh_auto_lp_controls()
 
     def refresh(self) -> None:
         model = self.app.model
@@ -350,6 +593,8 @@ class TabPanel:
                 bound_idx = none_idx
 
             self.combo.current(bound_idx)
+        if self.tab == TabId.LP:
+            self._refresh_auto_lp_controls()
 
     def selected_ids(self) -> List[str]:
         return [self.ids[i] for i in self.listbox.curselection() if i < len(self.ids)]
@@ -410,6 +655,7 @@ class App:
         self._setup_fonts_and_geometry()
 
         self.swap_lr_var = tk.BooleanVar(value=bool(loaded_cfg.get("swap_lr", False)))
+        self.model.swap_lr = bool(self.swap_lr_var.get())
         self.player = PreviewPlayer(
             lambda: self.ffmpeg_path,
             on_status=lambda msg: self._queue.put(("preview_status", msg)),
@@ -998,8 +1244,9 @@ class App:
         return self._image_mode_key
 
     def _on_swap_lr_toggled(self) -> None:
+        self.model.swap_lr = bool(self.swap_lr_var.get())
         if self._persist_settings:
-            save_app_settings({"swap_lr": bool(self.swap_lr_var.get())}, self.config_path)
+            save_app_settings({"swap_lr": self.model.swap_lr}, self.config_path)
 
     # ---------------------------------------------------- settings & i18n
     def change_language(self, lang_code: str) -> None:
@@ -1371,6 +1618,8 @@ class App:
                 self._active_tab = TabId.LP
             self._rebuild_tab_grid()
             self.select_tab(self._active_tab)
+        if self.swap_lr_var.get() != self.model.swap_lr:
+            self.swap_lr_var.set(self.model.swap_lr)
         self.refresh_all()
         self._update_dirty_flag()
         self.set_status(tr("status_undone"))
@@ -1388,6 +1637,8 @@ class App:
                 self._active_tab = TabId.LP
             self._rebuild_tab_grid()
             self.select_tab(self._active_tab)
+        if self.swap_lr_var.get() != self.model.swap_lr:
+            self.swap_lr_var.set(self.model.swap_lr)
         self.refresh_all()
         self._update_dirty_flag()
         self.set_status(tr("status_redone"))
@@ -1569,6 +1820,7 @@ class App:
         self.model.set_chart(chart)
         self.model.clear()
         self.model.set_separate_lbd(self.separate_lbd_var.get())
+        self.model.swap_lr = bool(self.swap_lr_var.get())
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._clean_snapshot = self.model.snapshot()
@@ -1917,6 +2169,10 @@ class App:
 
     # --------------------------------------------------------- mapping JSON I/O
     def on_save_mapping(self) -> None:
+        lp_panel = self.panels.get(TabId.LP)
+        if lp_panel is not None:
+            lp_panel.sync_auto_lp_to_model(push_undo=False)
+        self.model.swap_lr = bool(self.swap_lr_var.get())
         path = filedialog.asksaveasfilename(
             parent=self.root,
             title=tr("save_map_btn"),
@@ -1942,11 +2198,19 @@ class App:
                 parent=self.root,
             )
             return
-        path = filedialog.askopenfilename(
-            parent=self.root,
-            title=tr("load_map_btn"),
-            filetypes=[("JSON", "*.json")],
+        initial_dir, initial_file = suggest_load_mapping_location(
+            self.chart, self.last_output_dir, self.out_var.get()
         )
+        dlg_kw: Dict[str, Any] = {
+            "parent": self.root,
+            "title": tr("load_map_btn"),
+            "filetypes": [("JSON", "*.json")],
+        }
+        if initial_dir is not None:
+            dlg_kw["initialdir"] = str(initial_dir)
+        if initial_file is not None:
+            dlg_kw["initialfile"] = initial_file
+        path = filedialog.askopenfilename(**dlg_kw)
         if not path:
             return
         before = self.model.snapshot()
@@ -1963,6 +2227,8 @@ class App:
         if self.model.separate_lbd != self.separate_lbd_var.get():
             self.separate_lbd_var.set(self.model.separate_lbd)
             self._rebuild_tab_grid()
+        if self.model.swap_lr != self.swap_lr_var.get():
+            self.swap_lr_var.set(self.model.swap_lr)
         self.refresh_all()
         self.set_status(tr("status_map_loaded", count=self.model.total_assigned))
         if notes:
@@ -2025,6 +2291,11 @@ class App:
             ):
                 return
             render_bgm = False
+
+        lp_panel = self.panels.get(TabId.LP)
+        if lp_panel is not None:
+            lp_panel.sync_auto_lp_to_model(push_undo=False)
+        self.model.swap_lr = bool(self.swap_lr_var.get())
 
         out_dir = Path(out_text)
         options = ConversionOptions(

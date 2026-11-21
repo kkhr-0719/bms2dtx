@@ -949,6 +949,103 @@ class AppIntegrationTests(ChartCase):
         self.assertTrue(shown and "test.dtx" in shown[0])
         self.assertEqual(snapshot(self.bms.parent), before)
 
+    def test_v030_version_i18n_load_dir_and_lp_tab_dual_row_undo_redo(self) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+        from core.constants import AUTO_LP_CHIP_AUTO, AUTO_LP_CHIP_EMPTY_ZZ, AUTO_LP_CHIP_NONE
+        from gui import APP_VERSION
+        from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
+        from gui.i18n import TRANSLATIONS, get_language, tr
+
+        self.assertEqual(APP_VERSION, "0.3.0")
+
+        # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
+        base_keys = set(TRANSLATIONS["zh_CN"].keys())
+        self.assertEqual(set(TRANSLATIONS["en"].keys()), base_keys)
+        self.assertEqual(set(TRANSLATIONS["ja"].keys()), base_keys)
+        self.assertEqual(TRANSLATIONS["zh_CN"]["save_map_btn"], "另存为 JSON...")
+        self.assertEqual(TRANSLATIONS["en"]["save_map_btn"], "Save JSON As...")
+        self.assertEqual(TRANSLATIONS["ja"]["save_map_btn"], "JSONに別名保存...")
+        self.assertEqual(self.app.save_map_btn.cget("text"), tr("save_map_btn", lang=get_language()))
+
+        # 2) Verify auto_lp_combobox_values and suggest_load_mapping_location.
+        combo_vals = auto_lp_combobox_values(self.app.model, self.chart)
+        self.assertGreaterEqual(len(combo_vals), 3)
+        self.assertEqual([v for _, v in combo_vals[:3]], [AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_AUTO, AUTO_LP_CHIP_EMPTY_ZZ])
+
+        out_dir = self.bms.parent / "out_suggest"
+        out_dir.mkdir(exist_ok=True)
+        loc_empty = suggest_load_mapping_location(self.chart, out_dir, str(out_dir))
+        self.assertEqual(Path(loc_empty[0]), out_dir)
+        self.assertIsNone(loc_empty[1])
+
+        proj_json = out_dir / "__bms2dtx.json"
+        proj_json.write_text("{}", encoding="utf-8")
+        loc_present = suggest_load_mapping_location(self.chart, out_dir, str(out_dir))
+        self.assertEqual(Path(loc_present[0]), out_dir)
+        self.assertEqual(loc_present[1], "__bms2dtx.json")
+
+        # 3) Verify GUI title bar, TabId.LP dual-row widgets, Spinbox enable/disable, 1000ms tooltip, Undo/Redo.
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.3.0"))
+        self.app.select_tab(TabId.LP)
+        self.root.update()
+
+        lp_panel = self.app.panels[TabId.LP]
+        self.assertIsNotNone(lp_panel.auto_lp_combo)
+        self.assertIsNotNone(lp_panel.auto_lp_vol_spin)
+        self.assertIsNotNone(lp_panel.auto_lp_mode_note_rb)
+        self.assertIsNotNone(lp_panel.auto_lp_mode_ms_rb)
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
+        self.assertIsNotNone(lp_panel._lp_tip_combo)
+        self.assertEqual(lp_panel._lp_tip_combo._delay_ms, 1000)
+
+        def _walk_widgets(root_widget):
+            yield root_widget
+            for child in root_widget.winfo_children():
+                yield from _walk_widgets(child)
+
+        widgets = list(_walk_widgets(lp_panel.frame))
+        combos = [w for w in widgets if isinstance(w, ttk.Combobox)]
+        radios = [w for w in widgets if isinstance(w, ttk.Radiobutton)]
+        spins = [w for w in widgets if isinstance(w, (ttk.Spinbox, tk.Spinbox))]
+        self.assertGreaterEqual(len(combos), 2)
+        self.assertEqual(len(radios), 2)
+        self.assertGreaterEqual(len(spins), 1)
+
+        # Switch Auto-LP to "auto" -> Spinbox enabled, dirty=True, undoable.
+        auto_idx = lp_panel.auto_lp_chip_values.index(AUTO_LP_CHIP_AUTO)
+        lp_panel.auto_lp_combo.current(auto_idx)
+        lp_panel._on_auto_lp_changed()
+        self.root.update()
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "normal")
+        self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_AUTO)
+        self.assertTrue(self.app.dirty)
+
+        # Switch Auto-LP to "empty_zz" -> Spinbox disabled again.
+        zz_idx = lp_panel.auto_lp_chip_values.index(AUTO_LP_CHIP_EMPTY_ZZ)
+        lp_panel.auto_lp_combo.current(zz_idx)
+        lp_panel._on_auto_lp_changed()
+        self.root.update()
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
+        self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_EMPTY_ZZ)
+
+        # Undo should revert empty_zz -> auto; Undo again reverts auto -> none; Redo restores auto.
+        self.assertTrue(self.app.on_undo())
+        self.root.update()
+        self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_AUTO)
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "normal")
+
+        self.assertTrue(self.app.on_redo())
+        self.root.update()
+        self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_EMPTY_ZZ)
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
+
+        self.assertTrue(self.app.on_undo())
+        self.assertTrue(self.app.on_undo())
+        self.root.update()
+        self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_NONE)
+        self.assertFalse(self.app.dirty)
+
 
 if __name__ == "__main__":
     unittest.main()
