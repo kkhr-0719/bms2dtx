@@ -31,6 +31,16 @@ try:
 except ImportError:  # pragma: no cover - tested via explicit fallback helper
     np = None  # type: ignore
 
+try:
+    import soundfile as sf  # type: ignore
+except ImportError:  # pragma: no cover
+    sf = None  # type: ignore
+
+try:
+    import soxr  # type: ignore
+except ImportError:  # pragma: no cover
+    soxr = None  # type: ignore
+
 AudioData = Union["np.ndarray", array.array]
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -90,10 +100,60 @@ def find_ffmpeg(explicit_path: Optional[str] = None) -> str:
     )
 
 
+def _resolve_ffmpeg_optional(explicit_path: Optional[str] = None) -> Optional[str]:
+    """Best-effort ffmpeg lookup that returns None instead of raising when absent."""
+    try:
+        return find_ffmpeg(explicit_path)
+    except FfmpegNotFoundError:
+        return None
+
+
+def _resample_stereo_f32(arr: "np.ndarray", src_sr: int, dst_sr: int) -> "np.ndarray":
+    """Resample (N, 2) float32 audio via soxr (HQ) or pure-NumPy linear fallback."""
+    assert np is not None
+    if src_sr <= 0 or dst_sr <= 0 or src_sr == dst_sr or len(arr) == 0:
+        return arr.astype(np.float32, copy=False)
+    if soxr is not None:
+        try:
+            out = soxr.resample(arr, src_sr, dst_sr, quality="HQ")
+            return np.ascontiguousarray(out, dtype=np.float32)
+        except Exception:
+            pass
+    out_len = max(1, int(round(len(arr) * (dst_sr / float(src_sr)))))
+    if len(arr) == 1:
+        return np.repeat(arr.astype(np.float32, copy=False), out_len, axis=0)
+    x_old = np.linspace(0.0, 1.0, num=len(arr), endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=out_len, endpoint=False)
+    ch0 = np.interp(x_new, x_old, arr[:, 0])
+    ch1 = np.interp(x_new, x_old, arr[:, 1])
+    return np.column_stack([ch0, ch1]).astype(np.float32)
+
+
 def _decode_audio_to_f32_bytes(
-    audio_path: Path, ffmpeg_exe: str, sample_rate: int
+    audio_path: Path, ffmpeg_exe: Optional[str], sample_rate: int
 ) -> Tuple[Optional[bytes], Optional[str]]:
-    """Decode any audio file supported by ffmpeg to stereo float32le PCM bytes."""
+    """Decode audio via built-in soundfile (+ soxr/NumPy resample), falling back to ffmpeg."""
+    sf_err: Optional[str] = None
+    if sf is not None and np is not None:
+        try:
+            data, src_sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
+            if len(data) == 0:
+                return b"", None
+            if data.shape[1] == 1:
+                stereo = np.repeat(data, 2, axis=1)
+            else:
+                stereo = data[:, :2]
+            if not np.all(np.isfinite(stereo)):
+                stereo = np.nan_to_num(stereo, nan=0.0, posinf=0.0, neginf=0.0)
+            if int(src_sr) != int(sample_rate):
+                stereo = _resample_stereo_f32(stereo, int(src_sr), int(sample_rate))
+            return np.ascontiguousarray(stereo, dtype="<f4").tobytes(), None
+        except Exception as exc:  # pragma: no cover - fallback to ffmpeg for exotic codecs
+            sf_err = str(exc)
+
+    if not ffmpeg_exe:
+        return None, sf_err or "soundfile/numpy unavailable and ffmpeg not found"
+
     cmd = [
         ffmpeg_exe,
         "-v",
@@ -130,12 +190,43 @@ def _decode_audio_to_f32_bytes(
 def _encode_f32_to_ogg(
     pcm_chunks: Sequence[bytes],
     output_path: Path,
-    ffmpeg_exe: str,
+    ffmpeg_exe: Optional[str],
     sample_rate: int,
     ogg_quality: float,
 ) -> None:
-    """Encode stereo float32le PCM chunks to an OGG Vorbis file via ffmpeg."""
+    """Encode stereo float32le PCM chunks to OGG Vorbis via soundfile (ffmpeg fallback)."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    sf_err: Optional[Exception] = None
+    if sf is not None and np is not None:
+        try:
+            with sf.SoundFile(
+                str(output_path),
+                mode="w",
+                samplerate=int(sample_rate),
+                channels=2,
+                format="OGG",
+                subtype="VORBIS",
+            ) as out_file:
+                for chunk in pcm_chunks:
+                    if not chunk:
+                        continue
+                    arr = np.frombuffer(chunk, dtype="<f4").reshape(-1, 2)
+                    out_file.write(arr)
+            return
+        except Exception as exc:  # pragma: no cover
+            sf_err = exc
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if not ffmpeg_exe:
+        if sf_err is not None:
+            raise RuntimeError(f"Failed encoding {output_path.name} with soundfile: {sf_err}") from sf_err
+        raise FfmpegNotFoundError(
+            "Cannot encode OGG Vorbis: soundfile unavailable and ffmpeg not found."
+        )
+
     cmd = [
         ffmpeg_exe,
         "-v",
@@ -332,7 +423,7 @@ def render_bgm_ogg(
     cut_same_wav is reserved for future mono voice-cut mode; v1 default is polyphonic.
     """
     _ = cut_same_wav
-    ffmpeg_exe = find_ffmpeg(ffmpeg_path)
+    ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path)
     warnings: List[ConversionWarning] = []
 
     # Collect unique audio paths needed for unmapped events
@@ -472,6 +563,11 @@ _FFMPEG_AUDIO_STREAM_RE = re.compile(r"Audio:.*?,\s*\d+\s*Hz,\s*([^,\r\n]+)", re
 
 def _get_audio_channels(path: Path, ffmpeg_exe: Optional[str] = None) -> Optional[int]:
     """Detect audio channel count (1 for mono, 2 for stereo, or None if unknown)."""
+    if sf is not None:
+        try:
+            return int(sf.info(str(path)).channels)
+        except Exception:
+            pass
     if path.suffix.lower() == ".wav":
         try:
             with wave.open(str(path), "rb") as wf:
@@ -500,6 +596,29 @@ def _get_audio_channels(path: Path, ffmpeg_exe: Optional[str] = None) -> Optiona
     return None
 
 
+def _write_audio_via_soundfile(src: Path, dst: Path, *, swap_lr: bool) -> None:
+    """Read audio with soundfile, optionally swap L/R channels, and write to dst."""
+    if sf is None or np is None:
+        raise RuntimeError("soundfile/numpy unavailable")
+    info = sf.info(str(src))
+    data, sr = sf.read(str(src), dtype="float32", always_2d=True)
+    if swap_lr and data.shape[1] >= 2:
+        data = np.array(data, copy=True)
+        data[:, [0, 1]] = data[:, [1, 0]]
+    ext = dst.suffix.lower()
+    if ext == ".ogg":
+        sf.write(str(dst), data, int(sr), format="OGG", subtype="VORBIS")
+    elif ext == ".flac":
+        sf.write(str(dst), data, int(sr), format="FLAC")
+    elif ext == ".mp3":
+        sf.write(str(dst), data, int(sr), format="MP3")
+    elif ext == ".wav":
+        subtype = info.subtype if sf.check_format("WAV", info.subtype) else "PCM_16"
+        sf.write(str(dst), data, int(sr), format="WAV", subtype=subtype)
+    else:
+        raise RuntimeError(f"Unsupported output extension for soundfile: {ext}")
+
+
 def _codec_args_for_audio(dst: Path, ogg_quality: float) -> List[str]:
     ext = dst.suffix.lower()
     if ext == ".wav":
@@ -521,15 +640,30 @@ def _copy_or_swap_lr_audio(
     ffmpeg_exe: Optional[str],
     ogg_quality: float = 6.0,
 ) -> Optional[str]:
-    """Copy audio file or swap L/R stereo channels via ffmpeg; mono files always plain-copy."""
+    """Copy audio file or swap L/R stereo channels via soundfile (ffmpeg fallback); mono always copies."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if not swap_lr or not ffmpeg_exe:
+    if not swap_lr:
         shutil.copy2(src, dst)
         return None
     channels = _get_audio_channels(src, ffmpeg_exe)
     if channels == 1:
         shutil.copy2(src, dst)
         return None
+
+    sf_err: Optional[str] = None
+    try:
+        _write_audio_via_soundfile(src, dst, swap_lr=True)
+        return None
+    except Exception as exc:
+        sf_err = str(exc)
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if not ffmpeg_exe:
+        shutil.copy2(src, dst)
+        return sf_err or "ffmpeg not found"
 
     cmd = [
         ffmpeg_exe,
@@ -697,23 +831,12 @@ def materialize_retained_slices(
             else:
                 copy_jobs.append((src_path, dst_path))
 
-    if swap_lr and (copy_jobs or transcode_jobs):
-        try:
-            ffmpeg_exe = find_ffmpeg(ffmpeg_path)
-        except FfmpegNotFoundError:
-            if transcode_jobs:
-                raise
-            warnings.append(
-                ConversionWarning(
-                    code="SWAP_LR_NO_FFMPEG",
-                    message="ffmpeg not found; retained slices copied without L/R channel swap.",
-                )
-            )
-            ffmpeg_exe = None
+    if (swap_lr and copy_jobs) or transcode_jobs:
+        ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path)
 
     # Execute copies (or L/R swap on stereo copies)
     if copy_jobs:
-        if swap_lr and ffmpeg_exe:
+        if swap_lr:
             max_workers = min(8, os.cpu_count() or 4, len(copy_jobs))
 
             def _copy_or_swap_one(pair: Tuple[Path, Path]) -> Tuple[Path, Optional[str]]:
@@ -743,15 +866,28 @@ def materialize_retained_slices(
                 shutil.copy2(src, dst)
                 copied_files.append(dst)
 
-    # Execute .wav -> .ogg transcodes in parallel
+    # Execute .wav -> .ogg transcodes in parallel (built-in soundfile first, ffmpeg fallback)
     if transcode_jobs:
-        if ffmpeg_exe is None:
-            ffmpeg_exe = find_ffmpeg(ffmpeg_path)
         max_workers = min(8, os.cpu_count() or 4, len(transcode_jobs))
 
         def _transcode_one(pair: Tuple[Path, Path]) -> Tuple[Path, Optional[str]]:
             src, dst = pair
             dst.parent.mkdir(parents=True, exist_ok=True)
+            do_swap = bool(swap_lr and _get_audio_channels(src, ffmpeg_exe) != 1)
+            sf_err: Optional[str] = None
+            try:
+                _write_audio_via_soundfile(src, dst, swap_lr=do_swap)
+                return dst, None
+            except Exception as exc:
+                sf_err = str(exc)
+                try:
+                    dst.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            if not ffmpeg_exe:
+                return dst, sf_err or "ffmpeg not found"
+
             cmd = [
                 ffmpeg_exe,
                 "-v",
@@ -761,7 +897,7 @@ def materialize_retained_slices(
                 "-i",
                 str(src),
             ]
-            if swap_lr and _get_audio_channels(src, ffmpeg_exe) != 1:
+            if do_swap:
                 cmd.extend(["-af", "pan=stereo|c0=c1|c1=c0"])
             cmd.extend([
                 "-c:a",
@@ -837,12 +973,7 @@ def materialize_preview_audio(
     dst_path: Optional[Path] = None
     if copy_files:
         dst_path = _safe_output_dst(output_dir, rel_candidate, src_path)
-        ffmpeg_exe: Optional[str] = None
-        if swap_lr:
-            try:
-                ffmpeg_exe = find_ffmpeg(ffmpeg_path)
-            except FfmpegNotFoundError:
-                ffmpeg_exe = None
+        ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path) if swap_lr else None
         _copy_or_swap_lr_audio(
             src_path,
             dst_path,

@@ -24,15 +24,15 @@ _current_language: str = DEFAULT_LANGUAGE
 
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "zh_CN": {
-        "open_bms_btn": "选择 .bms / .bme 文件",
-        "no_chart_selected": "点击选择或拖入 .bms / .bme 文件",
+        "open_bms_btn": "选择 .bms / .bme / .bml / .pms 文件",
+        "no_chart_selected": "点击选择或拖入 .bms / .bme / .bml / .pms 文件",
         "config_btn": "⚙ 設定 / Config",
         "ffmpeg_warn_badge": "⚠ ffmpeg 未就绪",
-        "ffmpeg_ok": "ffmpeg: {path}",
-        "ffmpeg_missing_short": "ffmpeg: 未找到（已禁用 bgm.ogg 混音 / .ogg 转码 / 非 WAV 试听 / 图片缩放）",
+        "ffmpeg_ok": "内置音频引擎已就绪（WASAPI Shared）；FFmpeg（可选）: {path}",
+        "ffmpeg_missing_short": "内置音频引擎已就绪（WASAPI Shared），FFmpeg 仅用于冷门格式与老版图片缩放（可选，当前未配置）",
         "pick_ffmpeg_btn": "指定 ffmpeg.exe...",
-        "lang_label": "语言:",
-        "filetypes_bms": "BMS / BME 谱面",
+        "lang_label": "🌐 Language:",
+        "filetypes_bms": "BMS / BME / BML / PMS 谱面",
         "filetypes_all": "所有文件",
         "health_frame_title": "谱面体检",
         "health_placeholder": "导入谱面后将在此显示：标题 / 艺术家 / BPM / 编码 / 进制 / WAV 统计 / BGM 列统计 / 警告",
@@ -110,9 +110,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "export_bga_chk": "实验性 BGA 透传",
         "settings_title": "設定 / Settings",
         "settings_general_section": "界面语言",
-        "settings_ffmpeg_section": "ffmpeg 状态与路径",
+        "settings_ffmpeg_section": "音频引擎与 FFmpeg（可选）",
         "settings_ffmpeg_redetect_btn": "自动重新检测",
-        "settings_ffmpeg_hint": "获取指引：请将 ffmpeg.exe 放在程序同级目录或 bin\\ 子目录，或在 PowerShell 运行：",
+        "settings_ffmpeg_hint": "如需解码 .m4a/.wma 等冷门格式或启用老版图片缩放，可将 ffmpeg.exe 放在程序同级目录或 bin\\，或运行：",
         "settings_winget_cmd": "winget install Gyan.FFmpeg.Essentials",
         "settings_copy_cmd_btn": "复制命令",
         "settings_copied_cmd": "已复制 winget 命令",
@@ -159,7 +159,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_file_not_found_title": "文件不存在",
         "dialog_file_not_found_body": "找不到文件:\n{path}",
         "dialog_drop_invalid_title": "不支持的文件类型",
-        "dialog_drop_invalid_body": "请拖入 .bms / .bme / .bml 谱面文件:\n{name}",
+        "dialog_drop_invalid_body": "请拖入 .bms / .bme / .bml / .pms 谱面文件:\n{name}",
         "dialog_radix_title": "进制提示",
         "dialog_radix_body": (
             "检测到 Base-62 谱面或切片总数超过 DTX 36 进制可用上限 (1293，其中 ZY/ZZ 保留给 Auto-LP)。\n\n"
@@ -188,6 +188,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_export_no_ffmpeg_body": (
             "未找到 ffmpeg：将无法离线混音 bgm.ogg，导出的 .dtx 会引用不存在的 bgm.ogg。\n\n"
             "仍要只导出 .dtx 与保留的切片吗？（选“否”可先前往设置指定 ffmpeg.exe）"
+        ),
+        "dialog_export_resize_no_ffmpeg_body": (
+            "当前选择了“适配老版 DTX 尺寸（等比缩放 + 补黑边）”，但本机未配置 ffmpeg.exe。\n\n"
+            "若继续导出，图片将按原图直接复制；选“否”可先在右上角“⚙ 設定 / Config”中配置 ffmpeg.exe。"
         ),
         "dialog_export_done_title": "导出完成",
         "dialog_open_folder_err_title": "打开文件夹失败",
@@ -225,15 +229,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "map_note_toggle_on_ignored": "映射文件含 toggle_on=true，v1 GUI 仅支持 Toggle = OFF，已忽略。",
     },
     "en": {
-        "open_bms_btn": "Open .bms / .bme File",
-        "no_chart_selected": "Click to choose or drag & drop a .bms / .bme file",
+        "open_bms_btn": "Open .bms / .bme / .bml / .pms",
+        "no_chart_selected": "Click to choose or drag & drop a .bms / .bme / .bml / .pms file",
         "config_btn": "⚙ 設定 / Config",
         "ffmpeg_warn_badge": "⚠ ffmpeg missing",
-        "ffmpeg_ok": "ffmpeg: {path}",
-        "ffmpeg_missing_short": "ffmpeg: Not found (bgm.ogg mix / .ogg transcode / non-WAV preview disabled)",
+        "ffmpeg_ok": "Built-in audio engine ready (WASAPI Shared); FFmpeg (optional): {path}",
+        "ffmpeg_missing_short": "Built-in audio engine ready (WASAPI Shared); FFmpeg only needed for rare codecs & legacy image resize (optional, not configured)",
         "pick_ffmpeg_btn": "Locate ffmpeg.exe...",
-        "lang_label": "Language:",
-        "filetypes_bms": "BMS / BME Charts",
+        "lang_label": "🌐 Language:",
+        "filetypes_bms": "BMS / BME / BML / PMS Charts",
         "filetypes_all": "All Files",
         "health_frame_title": "Chart Inspection",
         "health_placeholder": "Import a chart to view: Title / Artist / BPM / Encoding / Radix / WAV Stats / BGM Columns / Warnings",
@@ -312,9 +316,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "export_bga_chk": "Experimental BGA passthrough",
         "settings_title": "Settings / 設定",
         "settings_general_section": "Language",
-        "settings_ffmpeg_section": "ffmpeg Status & Path",
+        "settings_ffmpeg_section": "Audio Engine & FFmpeg (Optional)",
         "settings_ffmpeg_redetect_btn": "Re-detect",
-        "settings_ffmpeg_hint": "How to get ffmpeg: place ffmpeg.exe beside the app or in bin\\, or run in PowerShell:",
+        "settings_ffmpeg_hint": "Optional: for rare formats (.m4a/.wma) or legacy image resize, place ffmpeg.exe beside the app or in bin\\, or run:",
         "settings_winget_cmd": "winget install Gyan.FFmpeg.Essentials",
         "settings_copy_cmd_btn": "Copy",
         "settings_copied_cmd": "winget command copied",
@@ -361,7 +365,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_file_not_found_title": "File Not Found",
         "dialog_file_not_found_body": "Could not find file:\n{path}",
         "dialog_drop_invalid_title": "Unsupported File",
-        "dialog_drop_invalid_body": "Please drop a .bms / .bme / .bml chart file:\n{name}",
+        "dialog_drop_invalid_body": "Please drop a .bms / .bme / .bml / .pms chart file:\n{name}",
         "dialog_radix_title": "Radix Notice",
         "dialog_radix_body": (
             "Detected a Base-62 chart or total slices exceeding the usable DTX Base-36 limit (1293; ZY/ZZ reserved for Auto-LP).\n\n"
@@ -390,6 +394,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_export_no_ffmpeg_body": (
             "ffmpeg not found: bgm.ogg cannot be rendered, and the exported .dtx will reference a non-existent bgm.ogg.\n\n"
             "Export .dtx and retained slices anyway? (Choose 'No' to configure ffmpeg.exe first)"
+        ),
+        "dialog_export_resize_no_ffmpeg_body": (
+            "'Resize for Legacy DTX' image mode is selected, but ffmpeg.exe is not configured.\n\n"
+            "Continue exporting (images will be copied as originals), or choose 'No' to configure ffmpeg.exe in Settings first?"
         ),
         "dialog_export_done_title": "Export Complete",
         "dialog_open_folder_err_title": "Failed to Open Folder",
@@ -427,15 +435,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "map_note_toggle_on_ignored": "Mapping file has toggle_on=true; v1 GUI supports Toggle = OFF only (ignored).",
     },
     "ja": {
-        "open_bms_btn": ".bms / .bme ファイルを選択",
-        "no_chart_selected": "クリックで選択、または .bms / .bme をドロップ",
+        "open_bms_btn": ".bms / .bme / .bml / .pms を選択",
+        "no_chart_selected": "クリックで選択、または .bms / .bme / .bml / .pms をドロップ",
         "config_btn": "⚙ 設定 / Config",
         "ffmpeg_warn_badge": "⚠ ffmpeg 未検出",
-        "ffmpeg_ok": "ffmpeg: {path}",
-        "ffmpeg_missing_short": "ffmpeg: 未検出（bgm.ogg ミックス / .ogg 変換 / 非WAV試聴は無効）",
+        "ffmpeg_ok": "内蔵オーディオエンジン準備完了（WASAPI Shared）；FFmpeg（任意）: {path}",
+        "ffmpeg_missing_short": "内蔵オーディオエンジン準備完了（WASAPI Shared）、FFmpeg は特殊形式と旧版画像リサイズ用（任意・未設定）",
         "pick_ffmpeg_btn": "ffmpeg.exe を指定...",
-        "lang_label": "言語:",
-        "filetypes_bms": "BMS / BME 譜面",
+        "lang_label": "🌐 Language:",
+        "filetypes_bms": "BMS / BME / BML / PMS 譜面",
         "filetypes_all": "すべてのファイル",
         "health_frame_title": "譜面チェック",
         "health_placeholder": "譜面を読み込むと表示されます：タイトル / アーティスト / BPM / 文字コード / 基数 / WAV統計 / BGM列 / 警告",
@@ -514,9 +522,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "export_bga_chk": "実験的 BGA パススルー",
         "settings_title": "設定 / Settings",
         "settings_general_section": "表示言語",
-        "settings_ffmpeg_section": "ffmpeg ステータスとパス",
+        "settings_ffmpeg_section": "オーディオエンジンと FFmpeg（任意）",
         "settings_ffmpeg_redetect_btn": "自動再検出",
-        "settings_ffmpeg_hint": "入手方法：ffmpeg.exe を本体と同階層または bin\\ に配置するか、PowerShell で実行：",
+        "settings_ffmpeg_hint": "任意：.m4a/.wma 等の特殊形式や旧版画像リサイズを使う場合は ffmpeg.exe を本体と同階層または bin\\ に配置、または実行：",
         "settings_winget_cmd": "winget install Gyan.FFmpeg.Essentials",
         "settings_copy_cmd_btn": "コピー",
         "settings_copied_cmd": "winget コマンドをコピーしました",
@@ -563,7 +571,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_file_not_found_title": "ファイルが見つかりません",
         "dialog_file_not_found_body": "ファイルが見つかりません:\n{path}",
         "dialog_drop_invalid_title": "未対応のファイル",
-        "dialog_drop_invalid_body": ".bms / .bme / .bml 譜面ファイルをドロップしてください:\n{name}",
+        "dialog_drop_invalid_body": ".bms / .bme / .bml / .pms 譜面ファイルをドロップしてください:\n{name}",
         "dialog_radix_title": "基数に関する通知",
         "dialog_radix_body": (
             "Base-62 譜面、またはスライス総数が利用可能な DTX 36進数上限 (1293; ZY/ZZ は Auto-LP 用に予約) を超えています。\n\n"
@@ -592,6 +600,10 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_export_no_ffmpeg_body": (
             "ffmpeg が見つからないため bgm.ogg を生成できません（出力される .dtx は存在しない bgm.ogg を参照します）。\n\n"
             ".dtx と保持スライスのみエクスポートしますか？（「いいえ」で先に ffmpeg.exe を指定できます）"
+        ),
+        "dialog_export_resize_no_ffmpeg_body": (
+            "「旧版 DTX サイズに合わせる（リサイズ + 黒帯）」が選択されていますが、ffmpeg.exe が設定されていません。\n\n"
+            "このまま元画像をコピーして続行しますか？（「いいえ」で設定画面から ffmpeg.exe を指定できます）"
         ),
         "dialog_export_done_title": "エクスポート完了",
         "dialog_open_folder_err_title": "フォルダを開けませんでした",

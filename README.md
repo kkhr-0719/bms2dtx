@@ -1,6 +1,6 @@
 # bms2dtx
 
-轻量级 Windows 桌面与命令行工具，用于将 **BMS / BME / BML** 谱面高效转换为 **DTXMania / DTXCreator** 可直接编辑和游玩的 `.dtx` 工程目录（Toggle = OFF 离线混音工作流）。
+轻量级 Windows 桌面与命令行工具，用于将 **BMS / BME / BML / PMS** 谱面高效转换为 **DTXMania / DTXCreator** 可直接编辑和游玩的 `.dtx` 工程目录（Toggle = OFF 离线混音工作流，**开箱即用无需安装 FFmpeg**）。
 
 ---
 
@@ -11,7 +11,7 @@
   - 编码优先级：`CP932` → `UTF-8-BOM` → `CP932(replace)`；导出支持传统 `CP932` 与 `UTF-8`。
   - 自动在内存中修正扩展名不一致的音频/图片/BGA（例如谱面写 `.wav` 而磁盘为 `.ogg`/`.flac`/`.mp3`/`.xa`）。
   - 严格保留 `:00` 占位行以对齐 iBMSC / μBMSC 的 `B1..Bn` BGM 列号，同时剔除全曲空轨。
-  - 完整支持 `#BASE 62` 与超限检测、精确 BPM/exBPM 变速与粘性 `02` 拍号还原、`#LNTYPE 1/2` 与 `#LNOBJ` 长条去重触发。
+  - 完整支持 `#BASE 62` 与超限检测、精确 BPM/exBPM 变速与粘性 `02` 拍号还原、`.bml` 长押（`#LNTYPE 1/2` 与 `#LNOBJ` 起音发声、尾标静默）及 `.pms` 9 键全 18 轨道（`11`–`19` & `21`–`29`）。
 - **15-Tab 视觉映射与单音试听**：
   - 覆盖 12 鼓轨（`LC`, `HH Close`, `HH Open`, `LP`, `LBD`, `SD`, `HT`, `BD`, `LT`, `FT`, `CY`, `RD`）及 `Other`（`SE6`）、`Guitar`（`SE11-12`）、`Bass`（`SE13-14`），默认隐藏并自动合并 `LBD` 至 `BD`（可勾选单独定义）。
   - 左侧 4 列 `Treeview` 支持扩展多选、已分配置灰提示、同名物理文件自动折叠去重、按文件名/片假名/编号序列（`tom1/tom2/tom3`）智能猜轨，以及左/右列表联动单音试听与 `Ctrl+Z` / `Ctrl+Y` 撤销重做。
@@ -26,13 +26,11 @@
 
 ---
 
-## FFmpeg 配置
+## 内置音频引擎与可选 FFmpeg
 
-程序打包时**不内嵌** `ffmpeg.exe` 体积，运行离线混音（`bgm.ogg`）、`.wav → .ogg` 转码、图片缩放、非 `.wav` 试听及 `Swap L/R` 时需依赖 `ffmpeg`。程序按以下优先级自动探测：
-
-1. 可执行文件同级目录（`bms2dtx.exe` 旁）及其 `bin/` 子目录；
-2. 系统环境变量 `PATH`；
-3. GUI 右上角 **`⚙ 設定 / Config`** 弹窗内手动指定路径或一键复制安装命令：
+自 **v0.4.0** 起，`bms2dtx` 内置 **`soundfile` (`libsndfile`) + `soxr` + `sounddevice` (Windows WASAPI Shared)**：
+- 常规 `.wav` / `.ogg` / `.flac` / `.mp3` 谱面的单音试听（WASAPI Shared 不独占声卡）、`bgm.ogg` 混合采样率离线混音、`.wav → .ogg` 转码及 `Swap L/R` **完全无需配置 FFmpeg，开箱即用**。
+- 仅在遇到 `.m4a` / `.wma` 等冷门格式，或启用「适配老版 DTX 尺寸（等比缩放 + 补黑边）」图片模式时才需要可选 `ffmpeg.exe`（按可执行文件同级/`bin/` → `PATH` → `⚙ 設定 / Config` 弹窗手动指定 3 级查找）：
 
 ```powershell
 winget install Gyan.FFmpeg.Essentials
@@ -42,7 +40,7 @@ winget install Gyan.FFmpeg.Essentials
 
 ## 界面使用简要指南
 
-1. **导入谱面**：点击左上角打开文件，或直接将 `.bms` / `.bme` / `.bml` 文件拖入窗口。
+1. **导入谱面**：点击左上角打开文件，或直接将 `.bms` / `.bme` / `.bml` / `.pms` 文件拖入窗口（支持完整 Unicode 中文/日文路径）。
 2. **分轨映射**：
    - 在左侧列表选择切片（`Shift`/`Ctrl` 多选，或用「按文件名猜轨」辅助初始填充），按中间绿色箭头加入右侧当前 Tab。
    - 右侧 12 个鼓轨支持选择默认绑定芯片（用于生成 `#DTXC_LANEBINDEDCHIP`，默认自动挑选使用频率最高切片）。

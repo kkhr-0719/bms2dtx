@@ -8,8 +8,11 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import List, Optional
+
+os.environ.setdefault("PATH", "")
 
 
 def _emit(text: str, outfile: Optional[str] = None) -> None:
@@ -34,6 +37,15 @@ def smoke_test(outfile: Optional[str] = None) -> int:
         import numpy
 
         lines.append(f"numpy {numpy.__version__}")
+        import soundfile
+
+        lines.append(f"soundfile {soundfile.__version__}")
+        import sounddevice
+
+        lines.append(f"sounddevice {sounddevice.__version__}")
+        import soxr
+
+        lines.append(f"soxr {soxr.__version__}")
         import tkinter
 
         import _tkinter  # noqa: F401

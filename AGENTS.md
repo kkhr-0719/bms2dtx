@@ -1,8 +1,8 @@
 # Project: bms2dtx (`bms2dtx.exe`)
 
 ## 1. 项目目标与版本约定
-- 构建一个轻量级 Windows 桌面工具，将 BMS / BME 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并支持通过 PyInstaller 打包为单文件无黑框可执行程序 `dist/bms2dtx.exe`（同时保留可运行的 Python CLI、源码与单元测试）。
-- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.3.0`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
+- 构建一个轻量级 Windows 桌面工具，将 BMS / BME / BML / PMS 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并支持通过 PyInstaller 打包为单文件无黑框可执行程序 `dist/bms2dtx.exe`（同时保留可运行的 Python CLI、源码与单元测试）。
+- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.4.0`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
 
 ---
 
@@ -26,9 +26,15 @@
    - 绝不允许写入不存在的 `SE33`（`93`）及以上通道，绝不允许将多条独立音轨硬塞进同一小节的 `01`（BGM）轨做多行叠加。
    - 遇到 `#STOP` / `09` 通道或未展开的 `#RANDOM` / `#IF` / `#SWITCH` 条件分支时，记录清晰警告。
    - 当 `separate_lbd=False`（默认隐藏 LBD Tab）时，若配置中仍残留 `LBD` 分配或绑定，导出时确定性地将其合并入 `BD`，绝不在 `1C` 轨生成幽灵音符。
-7. **Windows 进程与 `ffmpeg` 查找底线**：
-   - `find_ffmpeg` 在 `sys.frozen` 及开发环境下均优先查找 `Path(sys.executable).resolve().parent` 及 `bin/` 子目录，再回退系统 `PATH` 与设置弹窗手动指定。
-   - Windows 下所有调用 `ffmpeg` / `ffprobe` 的 `subprocess` 必须传入 `CREATE_NO_WINDOW`，防止打包后出现黑框闪屏。
+7. **内置音频引擎与 `ffmpeg` 可选化底线**：
+   - 核心解码、混音、OGG Vorbis 编码、异采样率重采样与立体声 `Swap L/R` 均优先走进程内 **`soundfile` (`libsndfile`) + `soxr`（NumPy 线性兜底）**，常规 `.wav`/`.ogg`/`.flac`/`.mp3` 导出与试听在零 FFmpeg 环境下必须 100% 跑通。
+   - 试听端（`gui/preview_player.py`）使用 **`sounddevice` (PortAudio)** 在 Windows 上显式优先选择 **`Windows WASAPI` Shared 模式**（`WasapiSettings(exclusive=False)`），无声卡/设备异常时安全降级、绝不崩溃；`swap_lr` 直接在内存 NumPy 数组翻转。
+   - `find_ffmpeg` 仅作为冷门音频格式（如 `.m4a`/`.wma`）与老版图片缩放的可选外挂：在 `sys.frozen` 及开发环境下优先查找 `Path(sys.executable).resolve().parent` 及 `bin/` 子目录，再回退系统 `PATH` 与设置弹窗；Windows 下所有调用 `ffmpeg` / `ffprobe` 的 `subprocess` 必须传入 `CREATE_NO_WINDOW`。
+8. **`.bml` 长押与 `.pms` 9 键解析规范**：
+   - 可见普通音符通道覆盖 `11`–`19` 与 `21`–`29`（支持 `.pms` 9 键），文件过滤与拖放支持 `*.bms;*.bme;*.bml;*.pms`。
+   - `.bml` 长押：`#LNTYPE 1`（`51`–`59` / `61`–`69` 按轨成对）奇数位起音发声、偶数位尾标静默不计数；`#LNTYPE 2`（连续同 ID）仅首音发声；`#LNOBJ xx` 指定的终点标记彻底静默、不计入 `use_count`。
+9. **64 位 Win32 `WM_DROPFILES` 拖放规范**：
+   - 严格使用 64 位安全的 `SetWindowLongPtrW`、`CallWindowProcW`、`GetParent`、`DragAcceptFiles`、`DragQueryFileW`、`DragFinish`，并完整声明 `c_void_p`、`c_ssize_t`、`c_size_t` 参数/返回类型，回调强引用保活且销毁时恢复原 `WNDPROC`；回调内部全程 `try...except` 保护，提取路径并立即 `DragFinish` 后通过 `root.after(0, ...)` 异步抛回主循环。
 
 ---
 
@@ -51,14 +57,14 @@
 ---
 
 ## 4. 桌面 GUI 与导出能力要点
-- **主流程与界面**：支持点击与 Win32 `WM_DROPFILES`（`DragQueryFileW` 完整 Unicode 路径）拖入导入；左侧 4 列 `ttk.Treeview`（`ID` / `文件名` / `次数` / `目标轨`，扩展多选置灰 + 2 行底部控制栏 + 悬停 Tooltip + 左右列表联动单音试听）；`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` 撤销重做栈（输入控件聚焦时不抢占）与未导出 `dirty` 关闭拦截。
+- **主流程与界面**：支持点击与 64 位安全 Win32 `WM_DROPFILES`（`DragQueryFileW` 完整 Unicode 路径，支持 `.bms`/`.bme`/`.bml`/`.pms`）拖入导入；左侧 4 列 `ttk.Treeview`（`ID` / `文件名` / `次数` / `目标轨`，扩展多选置灰 + 2 行底部控制栏 + 悬停 Tooltip + 左右列表联动 WASAPI Shared 单音试听）；`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` 撤销重做栈（输入控件聚焦时不抢占）与未导出 `dirty` 关闭拦截。
 - **LP Tab 双行扩展**：仅在 `LP` Tab 顶部显示默认绑定 + 阈值模式单选（第 1 行）与 `LP 补足` 下拉 / 音量微调框 / 阈值输入框（第 2 行），并为 `LP 补足` 控件挂载 **1000ms** 延迟悬停 Tooltip。
 - **格式与媒体增强**：
   - 原生 `#GENRE:`（`;` 转全角 `；`）、固定 `#COMMENT: via bms2dtx`、`#WAVxx` 行尾 `\t;<LABEL>` 注释（支持自定义与清洗）；
   - 2 级 `#PREVIEW`（先头部显式定义，未定义则扫描母目录未入谱 `preview*` 音频）；
   - `Swap L/R` 全局左右声道互换（试听、`bgm.ogg`、`#PREVIEW` 及保留切片；单声道切片原样复制）；
   - `#STAGEFILE` / `#PREIMAGE` / `#BACKGROUND` 三档图片处理（原图直拷 / `204x269`+`640x480` 等比缩放补黑边 / 不搬运）与实验性 BGA 透传（视频转 `#AVIxx` + `54` 轨，图片保持 `#BMPxx` + `04`/`07` 轨）；
-  - 三语（`zh_CN` / `en` / `ja`）热切换与 `%APPDATA%\bms2dtx\settings.json` 持久化。
+  - 设置弹窗语言标签固定为跨语言 **`🌐 Language:`**，支持三语（`zh_CN` / `en` / `ja`）热切换与 `%APPDATA%\bms2dtx\settings.json` 持久化。
 - **导出自动存档**：每次成功导出自动在输出目录根目录写入完整工程映射 **`__bms2dtx.json`**；界面按钮「另存为 JSON...」保留手动另存，「载入映射 JSON...」默认定位至输出目录。
 
 ---
@@ -66,7 +72,7 @@
 ## 5. Git 分支、测试脱敏与协同规则
 1. **Git 分支与安全规范**：
    - 新功能或重构**必须**在独立特性分支 `feat/*` 上开发；仅当全量单元测试（`-W error`）与 PyInstaller 打包及冒烟测试全部通过后，再切回 `main` 合并并清理分支。
-   - **严禁执行 `git push --force`**、严禁重写已有历史提交、严禁修改 `git config --global`（仓库身份配置一律使用 `--local`）。
+   - **严禁执行 `git push --force`**、严禁重写已有历史提交；初始化新仓库时可配好 `--local`，后续绝不改动 `git config --global`。
 2. **测试与脱敏规范**：
    - **严禁**在 `tests/` 或仓库源码中硬编码任何私人曲包名称或个人本地绝对路径。
    - 可选的真实谱面批量回归测试通过环境变量 `BMS2DTX_REAL_CHARTS_DIR` 动态读取（`tests/test_real_charts_batch.py`），未设置该环境变量时自动 `skip`。

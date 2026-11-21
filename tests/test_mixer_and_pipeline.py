@@ -1145,6 +1145,113 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertIn("#0011B: 00ZZ0000", dtx_zz)
             self.assertTrue((out_zz / PROJECT_MAPPING_FILENAME).is_file())
 
+    def test_zero_ffmpeg_mixed_samplerate_swap_lr_transcode_and_bml_ln_silence(self) -> None:
+        from unittest import mock
+        import numpy as np
+        import soundfile as sf
+        from core.constants import AUTO_LP_CHIP_AUTO
+        from core.mixer import FfmpegNotFoundError
+        from core.models import AutoLpConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+
+            # 44.1 kHz mono WAV (kick) + 48 kHz stereo OGG (pad, left-only) + 44.1 kHz stereo WAV (snare, left-only) + 44.1 kHz mono WAV (lp)
+            sr44 = 44100
+            sr48 = 48000
+            t44 = np.arange(int(sr44 * 0.08), dtype=np.float32) / sr44
+            t48 = np.arange(int(sr48 * 0.08), dtype=np.float32) / sr48
+            mono_kick = (0.3 * np.sin(2 * np.pi * 120 * t44)).astype(np.float32)
+            sf.write(str(src / "kick.wav"), mono_kick, sr44, format="WAV", subtype="PCM_16")
+
+            pad_left = (0.3 * np.sin(2 * np.pi * 440 * t48)).astype(np.float32)
+            pad_stereo = np.column_stack([pad_left, np.zeros_like(pad_left)])
+            sf.write(str(src / "pad.ogg"), pad_stereo, sr48, format="OGG", subtype="VORBIS")
+
+            snare_left = (0.4 * np.sin(2 * np.pi * 660 * t44)).astype(np.float32)
+            snare_stereo = np.column_stack([snare_left, np.zeros_like(snare_left)])
+            sf.write(str(src / "snare.wav"), snare_stereo, sr44, format="WAV", subtype="PCM_16")
+
+            lp_tone = (0.25 * np.sin(2 * np.pi * 300 * t44)).astype(np.float32)
+            sf.write(str(src / "lp.wav"), lp_tone, sr44, format="WAV", subtype="PCM_16")
+
+            hhc_tone = (0.25 * np.sin(2 * np.pi * 900 * t44)).astype(np.float32)
+            sf.write(str(src / "hhc.wav"), hhc_tone, sr44, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "hho.wav"), hhc_tone, sr44, format="WAV", subtype="PCM_16")
+
+            # .bml chart with LNTYPE 1 (ch 51: start at M001 0.0, silent end at M002 0.0),
+            # mixed sample rates on BGM, plus OHH->CHH for Auto-LP
+            bml = src / "ln_mix.bml"
+            bml.write_text(
+                "\n".join(
+                    [
+                        "#TITLE ZeroFfmpegBML",
+                        "#BPM 120",
+                        "#LNTYPE 1",
+                        "#WAV01 kick.wav",
+                        "#WAV02 pad.ogg",
+                        "#WAV03 snare.wav",
+                        "#WAV04 hhc.wav",
+                        "#WAV05 hho.wav",
+                        "#WAV06 lp.wav",
+                        "#00101:0100",
+                        "#00151:0200",
+                        "#00251:0200",
+                        "#00118:05000000",
+                        "#00111:00040000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            out = root / "out_zero_ff"
+            before = _dir_snapshot(src)
+            with mock.patch("core.mixer.find_ffmpeg", side_effect=FfmpegNotFoundError("no ffmpeg")):
+                res = convert_bms(
+                    bml,
+                    ConversionOptions(
+                        output_dir=out,
+                        transcode_wav_to_ogg=True,
+                        render_bgm=True,
+                        swap_lr=True,
+                    ),
+                    mapping=MappingConfig(
+                        tab_wavs={
+                            TabId.SD: ["03"],
+                            TabId.HH_CLOSE: ["04"],
+                            TabId.HH_OPEN: ["05"],
+                            TabId.LP: ["06"],
+                        },
+                        default_lane_binds={TabId.LP: "06"},
+                        auto_lp=AutoLpConfig(chip_mode=AUTO_LP_CHIP_AUTO, volume=80),
+                    ),
+                )
+
+            self.assertEqual(_dir_snapshot(src), before)
+            self.assertTrue((out / "bgm.ogg").is_file())
+            self.assertGreater(res.mix_stats.rms, 0.0)
+            self.assertEqual(res.auto_lp_placed_count, 1)
+
+            # Verify bgm.ogg has energy at M001 (2.0s: kick + pad LN start) and is silent at M002 (4.0s: LN end marker!)
+            bgm_data, bgm_sr = sf.read(str(out / "bgm.ogg"), dtype="float32", always_2d=True)
+            self.assertEqual(bgm_sr, 44100)
+            m1_start = int(2.0 * bgm_sr)
+            m2_start = int(4.0 * bgm_sr)
+            self.assertGreater(float(np.max(np.abs(bgm_data[m1_start : m1_start + 500]))), 0.1)
+            self.assertGreater(len(bgm_data), m2_start + 500)
+            self.assertLess(float(np.max(np.abs(bgm_data[m2_start : m2_start + 500]))), 1e-3)
+
+            # Verify retained stereo snare was transcoded to .ogg AND had L/R swapped in-process!
+            snare_ogg = out / "snare.ogg"
+            self.assertTrue(snare_ogg.is_file())
+            sn_data, _ = sf.read(str(snare_ogg), dtype="float32", always_2d=True)
+            self.assertEqual(sn_data.shape[1], 2)
+            # Original snare had energy on L (col 0) and 0 on R (col 1); swapped => R has energy, L ~ 0
+            self.assertLess(float(np.max(np.abs(sn_data[:, 0]))), 0.02)
+            self.assertGreater(float(np.max(np.abs(sn_data[:, 1]))), 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()
