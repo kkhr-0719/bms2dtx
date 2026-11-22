@@ -193,6 +193,7 @@ class AssignmentModel:
     default_bind_mode: str = "auto"
     auto_lp: AutoLpConfig = field(default_factory=AutoLpConfig)
     swap_lr: bool = False
+    swapped_wav_ids: set[str] = field(default_factory=set)
     chart: Optional[BmsChart] = field(default=None, repr=False, compare=False)
 
     def set_chart(self, chart: Optional[BmsChart]) -> None:
@@ -217,6 +218,7 @@ class AssignmentModel:
             self.tab_wavs[tab] = []
         self.default_binds.clear()
         self.explicit_unbinds.clear()
+        self.swapped_wav_ids.clear()
         self.auto_lp = AutoLpConfig()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -229,6 +231,7 @@ class AssignmentModel:
             "default_bind_mode": self.default_bind_mode,
             "auto_lp": self._copy_auto_lp(self.auto_lp),
             "swap_lr": bool(self.swap_lr),
+            "swapped_wav_ids": sorted(self.swapped_wav_ids),
         }
 
     def restore(self, snap: Dict[str, Any]) -> None:
@@ -245,6 +248,45 @@ class AssignmentModel:
             self.auto_lp = self._copy_auto_lp(snap["auto_lp"])
         if "swap_lr" in snap:
             self.swap_lr = bool(snap["swap_lr"])
+        self.swapped_wav_ids = set(snap.get("swapped_wav_ids", ()))
+
+    def is_slice_swap_override(self, wav_id: str) -> bool:
+        """Return True if ``wav_id`` has a per-slice L/R swap override."""
+        norm = normalize_wav_id(self.chart, wav_id)
+        return norm in self.swapped_wav_ids
+
+    def is_effective_swap_lr(
+        self, wav_id: str, *, global_swap_lr: Optional[bool] = None
+    ) -> bool:
+        """Return XOR effective L/R swap state: ``bool(global_swap_lr) ^ bool(item_override)``."""
+        g = bool(self.swap_lr if global_swap_lr is None else global_swap_lr)
+        return g ^ self.is_slice_swap_override(wav_id)
+
+    def toggle_slice_swap_lr(
+        self, wav_ids: Iterable[str], chart: Optional[BmsChart] = None
+    ) -> List[str]:
+        """Toggle per-slice L/R swap override for ``wav_ids`` (propagating across physical file groups)."""
+        active_chart = chart if chart is not None else self.chart
+        toggled: List[str] = []
+        seen_groups: set[str] = set()
+        _rep_to_group, wid_to_rep = wav_physical_groups(active_chart)
+        for raw_wid in wav_ids:
+            norm = normalize_wav_id(active_chart, str(raw_wid))
+            if not norm:
+                continue
+            rep = wid_to_rep.get(norm, norm)
+            if rep in seen_groups:
+                continue
+            seen_groups.add(rep)
+            group = wav_group_for(active_chart, norm)
+            if any(m in self.swapped_wav_ids for m in group):
+                for m in group:
+                    self.swapped_wav_ids.discard(m)
+            else:
+                for m in group:
+                    self.swapped_wav_ids.add(m)
+            toggled.extend(group)
+        return toggled
 
     def set_separate_lbd(self, enabled: bool) -> None:
         self.separate_lbd = bool(enabled)
@@ -435,6 +477,7 @@ class AssignmentModel:
             separate_lbd=self.separate_lbd,
             default_bind_mode=self.default_bind_mode,
             auto_lp=self._copy_auto_lp(self.auto_lp),
+            swapped_wav_ids=sorted(self.swapped_wav_ids),
         )
 
     # ----- JSON (matches cli.py --map-json & __bms2dtx.json) -----
@@ -444,6 +487,7 @@ class AssignmentModel:
             swap_lr=self.swap_lr,
             tab_wavs_override=self.tab_wavs,
             default_binds_override=self.default_binds,
+            swapped_wav_ids_override=sorted(self.swapped_wav_ids),
         )
 
     def load_json_dict(
@@ -500,6 +544,17 @@ class AssignmentModel:
                 parsed_auto_lp.chip_mode = AUTO_LP_CHIP_NONE
         new_model.auto_lp = parsed_auto_lp
         new_model.swap_lr = bool(data.get("swap_lr", self.swap_lr))
+        raw_swapped = data.get("swapped_wav_ids", [])
+        if isinstance(raw_swapped, list):
+            cleaned_swapped: List[str] = []
+            for raw_id in raw_swapped:
+                wid = normalize_wav_id(active_chart, str(raw_id))
+                if not wid:
+                    continue
+                if valid is not None and wid not in valid:
+                    continue
+                cleaned_swapped.append(wid)
+            new_model.swapped_wav_ids = set(expand_wav_ids(active_chart, cleaned_swapped))
         if data.get("toggle_on"):
             notes.append(tr("map_note_toggle_on_ignored"))
         self.tab_wavs = new_model.tab_wavs
@@ -508,6 +563,7 @@ class AssignmentModel:
         self.separate_lbd = new_model.separate_lbd
         self.auto_lp = new_model.auto_lp
         self.swap_lr = new_model.swap_lr
+        self.swapped_wav_ids = new_model.swapped_wav_ids
         return notes
 
 
@@ -563,8 +619,9 @@ def format_wav_tree_values(
     chart: Optional[BmsChart] = None,
     group_ids: Optional[Sequence[str]] = None,
     total_use_count: Optional[int] = None,
-) -> Tuple[str, str, str, str]:
-    """Return 4 column strings `(ID, Filename, Count, Target)` for left ttk.Treeview."""
+    effective_swap_lr: bool = False,
+) -> Tuple[str, str, str, str, str]:
+    """Return 5 column strings `(ID, Filename, Count, Target, L/R)` for left ttk.Treeview."""
     if group_ids is None and chart is not None:
         group_ids = wav_group_for(chart, entry.wav_id)
     ids_label = ", ".join(group_ids) if group_ids else entry.wav_id
@@ -580,7 +637,8 @@ def format_wav_tree_values(
         fname = f"{fname} {tr('tag_missing')}"
     count_str = f"×{use_count}"
     target_str = tab_label(assigned_tab) if assigned_tab is not None else ""
-    return (ids_label, fname, count_str, target_str)
+    lr_str = "✓" if effective_swap_lr else "✗"
+    return (ids_label, fname, count_str, target_str, lr_str)
 
 
 def format_wav_row(

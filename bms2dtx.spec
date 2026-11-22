@@ -38,6 +38,17 @@ _EXTRA_BINS.extend(_soxr_bins)
 _EXTRA_HIDDEN.extend(_soxr_hi)
 _EXTRA_HIDDEN.extend(collect_submodules("soxr"))
 
+import tkinterdnd2  # noqa: E402
+
+_tkdnd_win64 = Path(tkinterdnd2.__file__).resolve().parent / "tkdnd" / "win-x64"
+if _tkdnd_win64.is_dir():
+    for _f in _tkdnd_win64.iterdir():
+        if _f.is_file():
+            if _f.suffix.lower() == ".dll":
+                _EXTRA_BINS.append((str(_f), "tkinterdnd2/tkdnd/win-x64"))
+            else:
+                _EXTRA_DATAS.append((str(_f), "tkinterdnd2/tkdnd/win-x64"))
+
 EXCLUDES = [
     "matplotlib", "scipy", "pandas", "PIL", "Pillow", "PyQt5", "PyQt6", "PySide2", "PySide6",
     "IPython", "jupyter", "notebook", "pytest", "setuptools", "pip", "wheel", "sphinx",
@@ -53,8 +64,9 @@ a = Analysis(
         "core", "core.audio_resolver", "core.constants", "core.converter", "core.dtx_writer",
         "core.encoding", "core.mapping", "core.mixer", "core.models", "core.parser",
         "core.se_allocator", "core.timeline",
-        "gui", "gui.app", "gui.auto_guess", "gui.helpers", "gui.i18n", "gui.preview_player",
+        "gui", "gui.app", "gui.auto_guess", "gui.crash_log", "gui.helpers", "gui.i18n", "gui.preview_player",
         "winsound", "numpy", "soundfile", "sounddevice", "soxr", "_cffi_backend",
+        "tkinterdnd2", "tkinterdnd2.TkinterDnD",
         *_EXTRA_HIDDEN,
     ],
     hookspath=[],
@@ -63,6 +75,18 @@ a = Analysis(
     excludes=EXCLUDES,
     noarchive=False,
 )
+
+
+def _keep_win64_tkdnd(entry) -> bool:
+    dest = str(entry[0]).replace("\\", "/").lower()
+    if "tkinterdnd2/tkdnd/" in dest and "tkinterdnd2/tkdnd/win-x64/" not in dest:
+        return False
+    return True
+
+
+a.datas = [e for e in a.datas if _keep_win64_tkdnd(e)]
+a.binaries = [e for e in a.binaries if _keep_win64_tkdnd(e)]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

@@ -51,12 +51,22 @@ def smoke_test(outfile: Optional[str] = None) -> int:
         import _tkinter  # noqa: F401
 
         lines.append(f"tkinter TkVersion {tkinter.TkVersion}")
+        import tkinterdnd2  # noqa: F401
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+
+        root = TkinterDnD.Tk()
+        root.withdraw()
+        root.drop_target_register(DND_FILES)
+        tkdnd_ver = getattr(root, "TkdndVersion", "ok")
+        root.destroy()
+        lines.append(f"tkdnd OK ({tkdnd_ver})")
         import core
 
         lines.append(f"core tabs={len(core.TAB_SPECS)}")
         import gui
         import gui.app  # noqa: F401
         import gui.auto_guess  # noqa: F401
+        import gui.crash_log  # noqa: F401
         import gui.helpers  # noqa: F401
         import gui.i18n  # noqa: F401
         import gui.preview_player  # noqa: F401
@@ -87,8 +97,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         outfile = args[idx + 1] if idx + 1 < len(args) and not args[idx + 1].startswith("-") else None
         return smoke_test(outfile)
 
+    from gui.crash_log import install_crash_handlers
     from gui.app import run
 
+    install_crash_handlers()
     return run(args)
 
 
