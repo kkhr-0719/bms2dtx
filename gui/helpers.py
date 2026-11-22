@@ -219,6 +219,7 @@ class AssignmentModel:
         self.default_binds.clear()
         self.explicit_unbinds.clear()
         self.swapped_wav_ids.clear()
+        self.swap_lr = False
         self.auto_lp = AutoLpConfig()
 
     def snapshot(self) -> Dict[str, Any]:
