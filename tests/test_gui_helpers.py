@@ -348,12 +348,110 @@ class AutoGuessTests(unittest.TestCase):
             "snow_lead.wav",
             "synth_pad.wav",
             "snake_fx.wav",
+            "bell_000.ogg",
             "crisp_bell_synth.wav",
+            "crisp_fx.wav",
         ):
-            if "bell" in name:
-                continue  # 'bell' token maps to RD; test crisp_fx instead
             self.assertIsNone(guess_tab_for_filename(name), name)
-        self.assertIsNone(guess_tab_for_filename("crisp_fx.wav"))
+
+    def test_v043_opend_hat_bell_cymbal_rd_isolation_and_stereo_pan(self) -> None:
+        # 1) HH Open typo / prefix tolerance & Ride+Bell vs bare bell
+        for name in (
+            "drums_opend_hat_001.ogg",
+            "opendhat.ogg",
+            "hh_opening.wav",
+            "op_hh.wav",
+            "ophat_01.wav",
+            "ハイハット_opend.wav",
+        ):
+            self.assertEqual(guess_tab_for_filename(name), TabId.HH_OPEN, name)
+
+        for name in (
+            "ride_bell_01.ogg",
+            "rdbell_01.ogg",
+            "cym_bell.wav",
+            "cymbal_bell_02.ogg",
+        ):
+            self.assertEqual(guess_tab_for_filename(name), TabId.RD, name)
+
+        # 2) Context RD isolation: explicit crash without explicit ride routes generic cymbal to RD
+        no_ride_res = guess_assignments(
+            [
+                ("01", "crash_01.wav"),
+                ("02", "cymbal_01.wav"),
+            ]
+        )
+        self.assertEqual(no_ride_res.get(TabId.LC), ["01"])  # center/missing crash default -> LC
+        self.assertEqual(no_ride_res.get(TabId.RD), ["02"])  # generic cymbal isolated -> RD
+
+        # When explicit ride is present, generic cymbal does NOT collapse into RD
+        with_ride_res = guess_assignments(
+            [
+                ("01", "crash_01.wav"),
+                ("02", "cymbal_01.wav"),
+                ("03", "ride_01.wav"),
+            ]
+        )
+        self.assertEqual(with_ride_res.get(TabId.LC), ["01"])
+        self.assertEqual(with_ride_res.get(TabId.CY), ["02"])
+        self.assertEqual(with_ride_res.get(TabId.RD), ["03"])
+
+        # 3) Stereo RMS panning detection (Left >= 1.5dB -> LC, Right >= 1.5dB -> CY, Center/Mono -> fallback)
+        import numpy as np
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            sr = 22050
+            n = 1024
+            t = np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
+            tone = 0.5 * np.sin(2.0 * np.pi * 440.0 * t).astype(np.float32)
+
+            p_left = d / "crash_01.wav"
+            sf.write(str(p_left), np.column_stack([tone, tone * 0.25]), sr)
+
+            p_right = d / "crash_02.wav"
+            sf.write(str(p_right), np.column_stack([tone * 0.25, tone]), sr)
+
+            p_center = d / "cymbal_03.wav"
+            sf.write(str(p_center), np.column_stack([tone, tone]), sr)
+
+            p_mono = d / "crash_mono.wav"
+            sf.write(str(p_mono), tone, sr)
+
+            pan_res = guess_assignments(
+                [
+                    ("01", p_left.name),
+                    ("02", p_right.name),
+                    ("03", p_center.name),
+                    ("04", p_mono.name),
+                    ("05", "ride_01.wav"),
+                    ("06", "left_crash.wav"),
+                    ("07", "right_crash.wav"),
+                ],
+                audio_paths={
+                    "01": p_left,
+                    "02": p_right,
+                    "03": p_center,
+                    "04": p_mono,
+                },
+            )
+            self.assertEqual(set(pan_res.get(TabId.LC, [])), {"01", "04", "06"})
+            self.assertEqual(set(pan_res.get(TabId.CY, [])), {"02", "03", "07"})
+            self.assertEqual(pan_res.get(TabId.RD), ["05"])
+
+            # effective_swap flips left/right stereo routing
+            swapped_res = guess_assignments(
+                [
+                    ("01", p_left.name),
+                    ("02", p_right.name),
+                    ("05", "ride_01.wav"),
+                ],
+                audio_paths={"01": p_left, "02": p_right},
+                effective_swaps={"01": True, "02": True},
+            )
+            self.assertEqual(swapped_res.get(TabId.CY), ["01"])
+            self.assertEqual(swapped_res.get(TabId.LC), ["02"])
 
     def test_guess_assignments_groups_ids_and_tom_sequence(self) -> None:
         res = guess_assignments(
@@ -963,7 +1061,7 @@ class AppIntegrationTests(ChartCase):
         from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
         from gui.i18n import TRANSLATIONS, get_language, tr
 
-        self.assertEqual(APP_VERSION, "0.4.2")
+        self.assertEqual(APP_VERSION, "0.4.3")
 
         # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
         base_keys = set(TRANSLATIONS["zh_CN"].keys())
@@ -992,7 +1090,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(loc_present[1], "__bms2dtx.json")
 
         # 3) Verify GUI title bar, TabId.LP dual-row widgets, Spinbox enable/disable, 1000ms tooltip, Undo/Redo.
-        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.2"))
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.3"))
         self.app.select_tab(TabId.LP)
         self.root.update()
 
@@ -1303,7 +1401,7 @@ class AppIntegrationTests(ChartCase):
         except ValueError as exc:
             write_crash_entry(type(exc), exc, exc.__traceback__, context="unit_test", log_path=log_file)
         log_text = log_file.read_text(encoding="utf-8")
-        self.assertIn("bms2dtx 0.4.2", log_text)
+        self.assertIn("bms2dtx 0.4.3", log_text)
         self.assertIn("ValueError: synthetic crash test", log_text)
 
         alerted: list[tuple[Path, str]] = []
@@ -1419,6 +1517,116 @@ class AppIntegrationTests(ChartCase):
         self.assertFalse(self.app.model.swap_lr)
         self.assertEqual(self.app.model.swapped_wav_ids, set())
         self.assertEqual(self.app.left_tree.item("01", "values")[4], "✗")
+
+    def test_v043_guess_modal_red_warning_blank_click_and_allow_left_remove(self) -> None:
+        import tkinter as tk
+        from types import SimpleNamespace
+        from gui.i18n import load_app_settings
+
+        # 1) Auto-guess completion modal displays bold red review warning
+        with mock.patch.object(self.app_mod.messagebox, "askyesno", return_value=True):
+            self.app.on_guess()
+        dlg = self.app._last_guess_dialog
+        self.assertIsNotNone(dlg)
+        self.assertTrue(dlg.winfo_exists())
+        red_labels = []
+
+        def _scan_labels(w):
+            if isinstance(w, tk.Label):
+                red_labels.append((w.cget("text"), str(w.cget("fg"))))
+            for c in w.winfo_children():
+                _scan_labels(c)
+
+        _scan_labels(dlg)
+        self.assertTrue(
+            any(fg.upper() == "#C62828" and "注意" in txt for txt, fg in red_labels),
+            red_labels,
+        )
+        dlg.destroy()
+
+        # 2) Blank click clears selection in left Treeview and right TabPanel Listbox
+        self.app.left_tree.selection_set(("01", "02"))
+        self.assertTrue(self.app.selected_left_ids())
+        with (
+            mock.patch.object(self.app.left_tree, "identify_region", return_value="nothing"),
+            mock.patch.object(self.app.left_tree, "identify_row", return_value=""),
+        ):
+            res_left = self.app._on_left_click(SimpleNamespace(x=10, y=999))
+        self.assertEqual(res_left, "break")
+        self.assertEqual(self.app.selected_left_ids(), [])
+
+        self.app.select_tab(TabId.SD)
+        sd_panel = self.app.panels[TabId.SD]
+        sd_panel.listbox.selection_set(0)
+        self.assertTrue(sd_panel.selected_ids())
+        bbox = sd_panel.listbox.bbox(len(sd_panel.ids) - 1)
+        below_y = (bbox[1] + bbox[3] + 20) if bbox else 999
+        res_right = sd_panel._on_right_click(SimpleNamespace(x=10, y=below_y))
+        self.assertEqual(res_right, "break")
+        self.assertEqual(sd_panel.selected_ids(), [])
+
+        # 3) allow_left_remove setting default False -> clicking Remove with left selection only does nothing
+        self.assertFalse(self.app.allow_left_remove)
+        self.app.select_tab(TabId.LC)  # switch away from SD where "02" lives
+        self.app.left_tree.selection_set(("02",))
+        self.app._set_focus_side("left")
+        self.app.on_remove()
+        self.assertIn("02", self.app.model.tab_wavs[TabId.SD])
+
+        # Enable allow_left_remove via Settings dialog & verify persistence + unassign + Undo/Redo
+        cfg_file = self.tmp / "v043_settings.json"
+        self.app.config_path = cfg_file
+        self.app._persist_settings = True
+        with mock.patch.object(tk.Toplevel, "grab_set", return_value=None):
+            self.app.open_settings_dialog()
+            self.root.update()
+            top = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+            def _find_checkbuttons(w):
+                out = []
+                if w.winfo_class() == "TCheckbutton":
+                    out.append(w)
+                for ch in w.winfo_children():
+                    out.extend(_find_checkbuttons(ch))
+                return out
+
+            chks = _find_checkbuttons(top)
+            self.assertTrue(chks)
+            chks[-1].invoke()  # check "allow_left_remove"
+            # Invoke Save & Close (first packed button on the right, or find by command text)
+            from gui.i18n import tr
+
+            def _find_btn(w, label):
+                if hasattr(w, "cget"):
+                    try:
+                        if str(w.cget("text")) == label:
+                            return w
+                    except Exception:
+                        pass
+                for ch in w.winfo_children():
+                    hit = _find_btn(ch, label)
+                    if hit is not None:
+                        return hit
+                return None
+
+            save_btn = _find_btn(top, tr("settings_save_btn"))
+            self.assertIsNotNone(save_btn)
+            save_btn.invoke()
+            self.root.update()
+
+        self.assertTrue(self.app.allow_left_remove)
+        self.assertTrue(load_app_settings(cfg_file)["allow_left_remove"])
+
+        self.app.select_tab(TabId.LC)
+        self.app.left_tree.selection_set(("02",))
+        self.app._set_focus_side("left")
+        self.app.on_remove()
+        self.assertNotIn("02", self.app.model.tab_wavs[TabId.SD])
+
+        self.assertTrue(self.app.on_undo())
+        self.assertIn("02", self.app.model.tab_wavs[TabId.SD])
+        self.assertTrue(self.app.on_redo())
+        self.assertNotIn("02", self.app.model.tab_wavs[TabId.SD])
 
 
 if __name__ == "__main__":

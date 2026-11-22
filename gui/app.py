@@ -375,13 +375,19 @@ class TabPanel:
         )
         self.listbox.bind("<space>", lambda _e: (self.app.preview_from_tab(self.tab), "break")[1])
 
-    def _on_right_click(self, event: Any) -> None:
+    def _on_right_click(self, event: Any) -> Optional[str]:
         self.app._set_focus_side("right")
-        if not self.app.auto_preview_var.get() or self.app.chart is None or not self.ids:
-            return
+        if not self.ids:
+            self.listbox.selection_clear(0, tk.END)
+            return "break"
         idx = self.listbox.nearest(event.y)
-        if 0 <= idx < len(self.ids):
+        bbox = self.listbox.bbox(idx) if idx >= 0 else None
+        if bbox is None or event.y < bbox[1] or event.y > bbox[1] + bbox[3]:
+            self.listbox.selection_clear(0, tk.END)
+            return "break"
+        if self.app.auto_preview_var.get() and self.app.chart is not None and 0 <= idx < len(self.ids):
             self.app._play_wav_id(self.ids[idx])
+        return None
 
     def _on_right_arrow_press(self, _event: Any = None) -> None:
         self.app._set_focus_side("right")
@@ -620,6 +626,7 @@ class App:
             "ffmpeg_path": None,
             "default_bind_mode": "auto",
             "swap_lr": False,
+            "allow_left_remove": False,
             "wav_labels": dict(DEFAULT_WAV_LABELS),
         }
         if self._persist_settings:
@@ -628,6 +635,7 @@ class App:
         self.chart: Optional[BmsChart] = None
         self.model = AssignmentModel(default_bind_mode=str(loaded_cfg.get("default_bind_mode", "auto")))
         self.wav_labels: Dict[str, str] = dict(loaded_cfg.get("wav_labels", DEFAULT_WAV_LABELS))
+        self.allow_left_remove: bool = bool(loaded_cfg.get("allow_left_remove", False))
         self.ffmpeg_explicit: Optional[str] = loaded_cfg.get("ffmpeg_path")
         self.ffmpeg_path: Optional[str] = None
         self.last_output_dir: Optional[Path] = None
@@ -647,6 +655,7 @@ class App:
 
         self._icon_image: Optional[tk.PhotoImage] = None
         self._tkdnd_ready: bool = False
+        self._last_guess_dialog: Optional[tk.Toplevel] = None
 
         attach_tk_crash_handler(root, show_dialog=self.startup_dialogs)
         self._update_window_title()
@@ -1413,6 +1422,13 @@ class App:
             pady=(6, 0),
         )
 
+        allow_left_remove_var = tk.BooleanVar(value=self.allow_left_remove)
+        ttk.Checkbutton(
+            container,
+            text=tr("settings_allow_left_remove_chk"),
+            variable=allow_left_remove_var,
+        ).pack(anchor="w", pady=(0, 8))
+
         # Bottom Save / Cancel
         btns = ttk.Frame(container)
         btns.pack(fill="x")
@@ -1429,6 +1445,7 @@ class App:
             self.ffmpeg_explicit = draft_explicit[0]
             self.detect_ffmpeg()
             self.wav_labels = new_labels
+            self.allow_left_remove = bool(allow_left_remove_var.get())
 
             prev_mode = self.model.default_bind_mode
             self.model.set_default_bind_mode(new_bind_mode)
@@ -1439,6 +1456,7 @@ class App:
                         "language": new_lang,
                         "ffmpeg_path": self.ffmpeg_explicit,
                         "default_bind_mode": self.model.default_bind_mode,
+                        "allow_left_remove": self.allow_left_remove,
                         "wav_labels": new_labels,
                     },
                     self.config_path,
@@ -1951,12 +1969,39 @@ class App:
         if self.chart is None:
             return
         tab = self.active_tab()
-        ids = self.panels[tab].selected_ids()
-        if not ids:
+        right_ids = self.panels[tab].selected_ids()
+        left_ids = self.selected_left_ids() if self.allow_left_remove else []
+
+        if self.allow_left_remove:
+            use_right = (self._last_focus_side == "right" and bool(right_ids)) or (
+                not left_ids and bool(right_ids)
+            )
+            if use_right:
+                before = self.model.snapshot()
+                removed = self.model.remove(tab, right_ids, chart=self.chart)
+                self._commit_undo(before)
+                self.refresh_left()
+                self.refresh_tab(tab)
+                self.set_status(
+                    tr("status_removed_from_tab", removed=len(removed), tab=tab_label(tab))
+                )
+                return
+            if left_ids:
+                before = self.model.snapshot()
+                removed = self.model.unassign_wav_ids(left_ids, chart=self.chart)
+                if removed:
+                    self._commit_undo(before)
+                    self.refresh_all()
+                self.set_status(
+                    tr("status_unassigned_from_left", removed=len(removed))
+                )
+                return
+
+        if not right_ids:
             self.set_status(tr("status_select_right_first"))
             return
         before = self.model.snapshot()
-        removed = self.model.remove(tab, ids, chart=self.chart)
+        removed = self.model.remove(tab, right_ids, chart=self.chart)
         self._commit_undo(before)
         self.refresh_left()
         self.refresh_tab(tab)
@@ -2013,7 +2058,21 @@ class App:
             for wid in rep_ids
             if wid not in assigned
         ]
-        guesses = guess_assignments(candidates)
+        audio_paths = {
+            wid: self.chart.wavs[wid].resolved_path
+            for wid, _name in candidates
+            if wid in self.chart.wavs
+        }
+        global_swap = bool(self.swap_lr_var.get())
+        effective_swaps = {
+            wid: self.model.is_effective_swap_lr(wid, global_swap_lr=global_swap)
+            for wid, _name in candidates
+        }
+        guesses = guess_assignments(
+            candidates,
+            audio_paths=audio_paths,
+            effective_swaps=effective_swaps,
+        )
         if not self.separate_lbd_var.get() and TabId.LBD in guesses:
             lbd_ids = guesses.pop(TabId.LBD)
             guesses.setdefault(TabId.BD, []).extend(lbd_ids)
@@ -2040,6 +2099,71 @@ class App:
         self._commit_undo(before)
         self.refresh_all()
         self.set_status(tr("status_guessed", total=total))
+        self.show_guess_complete_dialog(total)
+
+    def show_guess_complete_dialog(self, total: int) -> tk.Toplevel:
+        """Show completion modal after Auto-Guess with a prominent red review warning."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(tr("dialog_guess_done_title"))
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        self._last_guess_dialog = dlg
+
+        body = ttk.Frame(dlg, padding=16)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(
+            body,
+            text=tr("dialog_guess_done_summary", total=total),
+            font=self.normal_font,
+            wraplength=440,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        tk.Label(
+            body,
+            text=tr("dialog_guess_done_warning"),
+            fg="#C62828",
+            font=self.bold_font,
+            wraplength=440,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 14))
+
+        btn_frame = ttk.Frame(body)
+        btn_frame.pack(fill="x")
+        ok_btn = ttk.Button(
+            btn_frame,
+            text=tr("dialog_close_btn"),
+            command=dlg.destroy,
+        )
+        ok_btn.pack(side="right")
+
+        dlg.bind("<Return>", lambda _e: dlg.destroy())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        try:
+            dlg.update_idletasks()
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+            rh = self.root.winfo_height()
+            dw = dlg.winfo_reqwidth()
+            dh = dlg.winfo_reqheight()
+            if rw > 1 and rh > 1:
+                x = max(0, rx + (rw - dw) // 2)
+                y = max(0, ry + (rh - dh) // 2)
+                dlg.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        if self.startup_dialogs:
+            try:
+                dlg.grab_set()
+                ok_btn.focus_set()
+                self.root.wait_window(dlg)
+            except Exception:
+                pass
+        return dlg
 
     # ----------------------------------------------------------------- preview
     def _play_wav_id(self, wav_id: Optional[str]) -> None:
@@ -2064,13 +2188,24 @@ class App:
         if 0 <= idx < len(self._left_ids):
             self._play_wav_id(self._left_ids[idx])
 
-    def _on_left_click(self, event: Any) -> None:
+    def _on_left_click(self, event: Any) -> Optional[str]:
         self._set_focus_side("left")
-        if not self._left_ids:
-            return
+        region = self.left_tree.identify_region(event.x, event.y)
         row_iid = self.left_tree.identify_row(event.y)
-        if row_iid and row_iid in self._left_id_set and self.auto_preview_var.get() and self.chart is not None:
+        if not row_iid and region not in ("heading", "separator"):
+            sel = self.left_tree.selection()
+            if sel:
+                self.left_tree.selection_remove(*sel)
+            return "break"
+        if (
+            self._left_ids
+            and row_iid
+            and row_iid in self._left_id_set
+            and self.auto_preview_var.get()
+            and self.chart is not None
+        ):
             self._play_wav_id(row_iid)
+        return None
 
     def _on_left_arrow_press(self, _event: Any = None) -> None:
         self._set_focus_side("left")

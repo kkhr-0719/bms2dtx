@@ -100,7 +100,7 @@ def build_project_mapping_dict(
     )
     alp = config.auto_lp
     data: Dict[str, Any] = {
-        "version": "0.4.2",
+        "version": "0.4.3",
         "tab_wavs": {t.value: list(ids) for t, ids in src_tabs.items() if ids},
         "default_lane_binds": {t.value: w for t, w in src_binds.items() if w},
         "default_bind_mode": config.default_bind_mode,

@@ -386,6 +386,29 @@ class AssignmentModel:
             self.explicit_unbinds.discard(tab)
         return removed
 
+    def unassign_wav_ids(
+        self,
+        wav_ids: Iterable[str],
+        *,
+        chart: Optional[BmsChart] = None,
+    ) -> List[str]:
+        """Unassign ``wav_ids`` (and same-file siblings) from whichever Tab(s) own them."""
+        active_chart = chart if chart is not None else self.chart
+        expanded = expand_wav_ids(active_chart, wav_ids)
+        if not expanded:
+            return []
+        wanted = set(expanded)
+        removed_all: List[str] = []
+        seen: set[str] = set()
+        for tab in list(self.tab_wavs.keys()):
+            if not any(wid in wanted for wid in self.tab_wavs[tab]):
+                continue
+            for wid in self.remove(tab, expanded, chart=active_chart):
+                if wid not in seen:
+                    seen.add(wid)
+                    removed_all.append(wid)
+        return removed_all
+
     def auto_bind_for_tab(
         self, tab: TabId, chart: Optional[BmsChart] = None
     ) -> Optional[str]:

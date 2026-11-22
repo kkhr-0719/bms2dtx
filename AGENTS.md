@@ -2,7 +2,7 @@
 
 ## 1. 项目目标与版本约定
 - 构建一个轻量级 Windows 桌面工具，将 BMS / BME / BML / PMS 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并支持通过 PyInstaller 打包为单文件无黑框可执行程序 `dist/bms2dtx.exe`（同时保留可运行的 Python CLI、源码与单元测试）。
-- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.4.2`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
+- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.4.3`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
 
 ---
 
@@ -58,26 +58,28 @@
 ---
 
 ## 4. 桌面 GUI 与导出能力要点
-- **主流程与界面**：支持点击与 `tkinterdnd2`（`tkdnd` 原生 OLE 拖放，支持 `.bms`/`.bme`/`.bml`/`.pms` 完整 Unicode 路径）拖入导入；左侧 5 列 `ttk.Treeview`（`ID` / `文件名` / `次数` / `目标轨` / `L/R`，扩展多选置灰 + 中间栏 `⇄ L/R` 单切片/批量声道翻转按钮 + 2 行底部控制栏 + 悬停 Tooltip + 左右列表联动 WASAPI Shared 单音试听）；`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` 撤销重做栈（输入控件聚焦时不抢占）与未导出 `dirty` 关闭拦截。
+- **主流程与界面**：支持点击与 `tkinterdnd2`（`tkdnd` 原生 OLE 拖放，支持 `.bms`/`.bme`/`.bml`/`.pms` 完整 Unicode 路径）拖入导入；左侧 5 列 `ttk.Treeview`（`ID` / `文件名` / `次数` / `目标轨` / `L/R`，扩展多选置灰 + 中间栏 `⇄ L/R` 单切片/批量声道翻转按钮 + 2 行底部控制栏 + 悬停 Tooltip + 左右列表联动 WASAPI Shared 单音试听 + 点击左右列表空白区取消选中 + 设置项可选开启左侧直接点「移除」）；`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` 撤销重做栈（输入控件聚焦时不抢占）与未导出 `dirty` 关闭拦截。
+- **按文件名猜轨与声像分流**：支持 `HH Open` 拼写容错（如 `opend`）与 `bell` 去误伤（仅 `ride/cym + bell` 归 `RD`）；存在显式 Crash 且无显式 Ride 时将泛称 `cymbal/cym` 隔离至 `RD`；对 `crash/cymbal` 执行轻量立体声左右 RMS 差（≥ 1.5 dB）自动分流 `LC`/`CY`（遵循当前 `effective_swap`）；猜轨完成后弹出置顶红字提示人工复查。
 - **LP Tab 双行扩展**：仅在 `LP` Tab 顶部显示默认绑定 + 阈值模式单选（第 1 行）与 `LP 补足` 下拉 / 音量微调框 / 阈值输入框（第 2 行），并为 `LP 补足` 控件挂载 **1000ms** 延迟悬停 Tooltip。
 - **格式与媒体增强**：
   - 原生 `#GENRE:`（`;` 转全角 `；`）、固定 `#COMMENT: via bms2dtx`、`#WAVxx` 行尾 `\t;<LABEL>` 注释（支持自定义与清洗）；
   - 2 级 `#PREVIEW`（先头部显式定义，未定义则扫描母目录未入谱 `preview*` 音频）；
   - 全局 `Swap L/R` 与单切片 `⇄ L/R` 异或（`effective_swap = bool(global_swap_lr) ^ bool(item_override)`）左右声道互换（试听、`bgm.ogg` 单切片解码阶段翻转、`#PREVIEW` 及保留切片；单声道切片原样复制）；
   - `#STAGEFILE` / `#PREIMAGE` / `#BACKGROUND` 三档图片处理（原图直拷 / `204x269`+`640x480` 等比缩放补黑边 / 不搬运）与实验性 BGA 透传（视频转 `#AVIxx` + `54` 轨，图片保持 `#BMPxx` + `04`/`07` 轨）；
-  - 设置弹窗语言标签固定为跨语言 **`🌐 Language:`**，底部带「打开日志目录」按钮，支持三语（`zh_CN` / `en` / `ja`）热切换与 `%APPDATA%\bms2dtx\settings.json` 持久化。
+  - 设置弹窗语言标签固定为跨语言 **`🌐 Language:`**，含「允许左侧移除分配」勾选框与底部「打开日志目录」按钮，支持三语（`zh_CN` / `en` / `ja`）热切换与 `%APPDATA%\bms2dtx\settings.json` 持久化。
 - **导出自动存档**：每次成功导出自动在输出目录根目录写入完整工程映射 **`__bms2dtx.json`**；界面按钮「另存为 JSON...」保留手动另存，「载入映射 JSON...」默认定位至输出目录。
 
 ---
 
-## 5. Git 分支、测试脱敏与协同规则
-1. **Git 分支与安全规范**：
-   - 新功能或重构**必须**在独立特性分支 `feat/*` 上开发；仅当全量单元测试（`-W error`）与 PyInstaller 打包及冒烟测试全部通过后，再切回 `main` 合并并清理分支。
+## 5. Git 分支、发布纪律、测试脱敏与协同规则
+1. **Git 分支与发布验收纪律**：
+   - 新功能或修复**必须**在独立分支（`feat/*` 或 `fix/*`）上开发、提交并完成全量单元测试（`-W error`）与 PyInstaller 打包及双环境 `--smoke-test` 验证。
+   - **未经用户真机实测通过与明确指令，严禁擅自合并回 `main`，严禁擅自执行 `git push`**；发版前不得擅自跳升主/次版本号。
    - **严禁执行 `git push --force`**、严禁重写已有历史提交；初始化新仓库时可配好 `--local`，后续绝不改动 `git config --global`。
 2. **测试与脱敏规范**：
    - **严禁**在 `tests/` 或仓库源码中硬编码任何私人曲包名称或个人本地绝对路径。
    - 可选的真实谱面批量回归测试通过环境变量 `BMS2DTX_REAL_CHARTS_DIR` 动态读取（`tests/test_real_charts_batch.py`），未设置该环境变量时自动 `skip`。
    - `.gitignore` 必须过滤构建产物、媒体/谱面文件以及本地测试曲包目录，避免版权素材误入版本库。
-3. **AgentLimb / 浏览器 MCP 协同熔断规则**：
-   - **仅当**用户提示词明确要求联系网页端领航员时，才可启用浏览器 / AgentLimb MCP；无人值守或离线任务严禁擅自调用。
+3. **AgentLimb / 浏览器 MCP 默认开启（Opt-out）与熔断规则**：
+   - **默认启用 AgentLimb 与网页端领航员协同**（除非用户在提示词中明确要求「离线执行 / 不调用 AgentLimb」）：跨模块架构设计、同错连修 2 次未果、或完成测试与打包准备验收时，应主动通过 AgentLimb 与领航员同步汇报确认。
    - 启用期间，单次浏览器 / AgentLimb MCP 调用若发生超时或报错，**最多重试 1 次**；若仍失败，立即停止调用并降级为本地直接收尾汇报后停机，严禁在满载上下文下循环重试消耗额度。
