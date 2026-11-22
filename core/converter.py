@@ -84,6 +84,7 @@ def build_project_mapping_dict(
     swap_lr: bool = False,
     tab_wavs_override: Optional[Dict[TabId, List[str]]] = None,
     default_binds_override: Optional[Dict[TabId, str]] = None,
+    swapped_wav_ids_override: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Serialize full mapping configuration (for __bms2dtx.json auto-save & Save JSON)."""
     src_tabs = tab_wavs_override if tab_wavs_override is not None else config.tab_wavs
@@ -92,15 +93,21 @@ def build_project_mapping_dict(
         if default_binds_override is not None
         else config.default_lane_binds
     )
+    src_swapped = (
+        swapped_wav_ids_override
+        if swapped_wav_ids_override is not None
+        else config.swapped_wav_ids
+    )
     alp = config.auto_lp
     data: Dict[str, Any] = {
-        "version": "0.3.0",
+        "version": "0.4.1",
         "tab_wavs": {t.value: list(ids) for t, ids in src_tabs.items() if ids},
         "default_lane_binds": {t.value: w for t, w in src_binds.items() if w},
         "default_bind_mode": config.default_bind_mode,
         "toggle_on": False,
         "separate_lbd": bool(config.separate_lbd),
         "swap_lr": bool(swap_lr),
+        "swapped_wav_ids": sorted(set(str(w).strip() for w in src_swapped if str(w).strip())),
         "auto_lp": {
             "chip_mode": str(alp.chip_mode or AUTO_LP_CHIP_NONE),
             "volume": max(0, min(100, int(alp.volume))),
@@ -241,6 +248,7 @@ def convert_bms(
             ffmpeg_path=options.ffmpeg_path,
             reserve_bgm_ogg=not effective_toggle_on,
             swap_lr=options.swap_lr,
+            swapped_wav_ids=config.swapped_wav_ids,
         )
     )
     all_warnings.extend(mat_warnings)
@@ -364,6 +372,7 @@ def convert_bms(
             decode_cache=decode_cache,
             cut_same_wav=options.cut_same_wav,
             swap_lr=options.swap_lr,
+            swapped_wav_ids=config.swapped_wav_ids,
         )
         all_warnings.extend(mix_warnings)
 

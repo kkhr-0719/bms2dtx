@@ -403,6 +403,59 @@ def _mix_pure_python(
     return chunks, peak_before, peak_after, rms, gain
 
 
+def _swap_f32_stereo_bytes(raw: bytes) -> bytes:
+    """Swap Left and Right float32 channels in a stereo f32le byte buffer."""
+    if not raw:
+        return raw
+    if np is not None:
+        arr = np.frombuffer(raw, dtype="<f4").reshape(-1, 2)
+        return np.ascontiguousarray(arr[:, [1, 0]], dtype="<f4").tobytes()
+    need_swap = sys.byteorder != "little"
+    arr_py = array.array("f")
+    arr_py.frombytes(raw)
+    if need_swap:
+        arr_py.byteswap()
+    for i in range(0, len(arr_py) - 1, 2):
+        arr_py[i], arr_py[i + 1] = arr_py[i + 1], arr_py[i]
+    if need_swap:
+        arr_py.byteswap()
+    return arr_py.tobytes()
+
+
+def _normalize_swapped_wav_set(
+    chart: BmsChart, swapped_wav_ids: Optional[Sequence[str]]
+) -> set[str]:
+    """Normalize per-slice L/R swap override WAV IDs and propagate across shared physical files."""
+    if not swapped_wav_ids:
+        return set()
+    norm_ids: set[str] = set()
+    for raw_wid in swapped_wav_ids:
+        wid = str(raw_wid).strip()
+        if not wid:
+            continue
+        norm_ids.add(wid if chart.is_base62 else wid.upper())
+    if not norm_ids:
+        return set()
+    swapped_paths: set[Path] = set()
+    for wid in list(norm_ids):
+        entry = chart.wavs.get(wid)
+        if entry is not None and entry.exists and entry.resolved_path is not None:
+            try:
+                swapped_paths.add(entry.resolved_path.resolve())
+            except OSError:
+                swapped_paths.add(entry.resolved_path)
+    if swapped_paths:
+        for wid, entry in chart.wavs.items():
+            if entry.exists and entry.resolved_path is not None:
+                try:
+                    rp = entry.resolved_path.resolve()
+                except OSError:
+                    rp = entry.resolved_path
+                if rp in swapped_paths:
+                    norm_ids.add(wid)
+    return norm_ids
+
+
 def render_bgm_ogg(
     chart: BmsChart,
     unmapped_events: Sequence[NoteEvent],
@@ -415,20 +468,24 @@ def render_bgm_ogg(
     decode_cache: Optional[Dict[Tuple[Path, int], bytes]] = None,
     cut_same_wav: bool = False,
     swap_lr: bool = False,
+    swapped_wav_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[MixStats, List[ConversionWarning]]:
     """Offline-mix all unmapped BMS events along the exact timeline and export bgm.ogg.
 
     Deduplicates identical (start_frame, wav_id) triggers to prevent +6 dB phase spikes,
     and applies strictly downward-only peak limiting above 0.99 (never boosts quiet audio).
-    cut_same_wav is reserved for future mono voice-cut mode; v1 default is polyphonic.
+    Per-slice L/R channel swap is applied at the decoded slice level via XOR:
+    ``effective_swap = bool(swap_lr) ^ (wav_id in swapped_wav_ids)``.
     """
     _ = cut_same_wav
     ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path)
     warnings: List[ConversionWarning] = []
+    swapped_set = _normalize_swapped_wav_set(chart, swapped_wav_ids)
 
-    # Collect unique audio paths needed for unmapped events
+    # Collect unique audio paths needed for unmapped events and their per-slice effective_swap
     unique_paths: List[Path] = []
     seen_paths: set[Path] = set()
+    path_effective_swap: Dict[Path, bool] = {}
     seen_frame_wav: set[Tuple[int, str]] = set()
     missing_event_count = 0
     playable_pairs: List[Tuple[int, Path]] = []
@@ -444,17 +501,19 @@ def render_bgm_ogg(
             continue
         seen_frame_wav.add(dedup_key)
         playable_pairs.append((start_frame, entry.resolved_path))
+        eff_swap = bool(swap_lr) ^ (ev.wav_id in swapped_set)
         if entry.resolved_path not in seen_paths:
             seen_paths.add(entry.resolved_path)
             unique_paths.append(entry.resolved_path)
+            path_effective_swap[entry.resolved_path] = eff_swap
 
-    # Decode each unique file once in parallel (reusing decode_cache if provided)
-    decoded_raw: Dict[Path, bytes] = {}
+    # Decode each unique file once in parallel (reusing unswapped decode_cache if provided)
+    unswapped_raw: Dict[Path, bytes] = {}
     paths_to_decode: List[Path] = []
     for p in unique_paths:
         cache_key = (p, sample_rate)
         if decode_cache is not None and cache_key in decode_cache:
-            decoded_raw[p] = decode_cache[cache_key]
+            unswapped_raw[p] = decode_cache[cache_key]
         else:
             paths_to_decode.append(p)
 
@@ -472,9 +531,17 @@ def render_bgm_ogg(
                 if err is not None or raw is None:
                     decode_failures.append(f"{path.name}: {err}")
                 else:
-                    decoded_raw[path] = raw
+                    unswapped_raw[path] = raw
                     if decode_cache is not None:
                         decode_cache[(path, sample_rate)] = raw
+
+    # Apply per-slice effective_swap at the decoded slice stage
+    decoded_raw: Dict[Path, bytes] = {}
+    for p, raw in unswapped_raw.items():
+        if path_effective_swap.get(p, False):
+            decoded_raw[p] = _swap_f32_stereo_bytes(raw)
+        else:
+            decoded_raw[p] = raw
 
     if decode_failures:
         sample = "; ".join(decode_failures[:4])
@@ -509,11 +576,11 @@ def render_bgm_ogg(
     should_use_numpy = (np is not None) if use_numpy is None else (use_numpy and np is not None)
     if should_use_numpy:
         pcm_chunks, peak_before, peak_after, rms, gain = _mix_with_numpy(
-            decoded_raw, scheduled, total_frames, swap_lr=swap_lr
+            decoded_raw, scheduled, total_frames, swap_lr=False
         )
     else:
         pcm_chunks, peak_before, peak_after, rms, gain = _mix_pure_python(
-            decoded_raw, scheduled, total_frames, swap_lr=swap_lr
+            decoded_raw, scheduled, total_frames, swap_lr=False
         )
 
     if mixed_event_count == 0:
@@ -772,6 +839,7 @@ def materialize_retained_slices(
     ffmpeg_path: Optional[str] = None,
     reserve_bgm_ogg: bool = True,
     swap_lr: bool = False,
+    swapped_wav_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[Dict[str, str], List[Path], List[Path], List[ConversionWarning]]:
     """Copy or transcode retained slice files into output_dir (NEVER mutating source_dir).
 
@@ -782,6 +850,7 @@ def materialize_retained_slices(
     copied_files: List[Path] = []
     transcoded_files: List[Path] = []
     orig_to_out_name: Dict[str, str] = {}
+    swapped_set = _normalize_swapped_wav_set(chart, swapped_wav_ids)
 
     # Track source_path -> assigned relative output path (deduplicate shared files)
     src_to_rel_out: Dict[Path, str] = {}
@@ -792,8 +861,8 @@ def materialize_retained_slices(
         claimed_rel_lower["bgm.ogg"] = (output_dir / "bgm.ogg").resolve()
 
     ffmpeg_exe: Optional[str] = None
-    transcode_jobs: List[Tuple[Path, Path]] = []
-    copy_jobs: List[Tuple[Path, Path]] = []
+    transcode_jobs: List[Tuple[Path, Path, bool]] = []
+    copy_jobs: List[Tuple[Path, Path, bool]] = []
 
     for orig_wid in ordered_retained_orig_ids:
         entry = chart.wavs.get(orig_wid)
@@ -823,28 +892,30 @@ def materialize_retained_slices(
         claimed_rel_lower[rel_str.lower()] = src_path
         src_to_rel_out[src_path] = dtx_rel
         orig_to_out_name[orig_wid] = dtx_rel
+        eff_swap = bool(swap_lr) ^ (orig_wid in swapped_set)
 
         if copy_files:
             dst_path = _safe_output_dst(output_dir, rel_candidate, src_path)
             if is_wav_transcode:
-                transcode_jobs.append((src_path, dst_path))
+                transcode_jobs.append((src_path, dst_path, eff_swap))
             else:
-                copy_jobs.append((src_path, dst_path))
+                copy_jobs.append((src_path, dst_path, eff_swap))
 
-    if (swap_lr and copy_jobs) or transcode_jobs:
+    any_copy_swap = any(eff for _, _, eff in copy_jobs)
+    if any_copy_swap or transcode_jobs:
         ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path)
 
-    # Execute copies (or L/R swap on stereo copies)
+    # Execute copies (or L/R swap on stereo copies with effective_swap=True)
     if copy_jobs:
-        if swap_lr:
+        if any_copy_swap:
             max_workers = min(8, os.cpu_count() or 4, len(copy_jobs))
 
-            def _copy_or_swap_one(pair: Tuple[Path, Path]) -> Tuple[Path, Optional[str]]:
-                src, dst = pair
+            def _copy_or_swap_one(job: Tuple[Path, Path, bool]) -> Tuple[Path, Optional[str]]:
+                src, dst, eff_swap = job
                 err = _copy_or_swap_lr_audio(
                     src,
                     dst,
-                    swap_lr=True,
+                    swap_lr=eff_swap,
                     ffmpeg_exe=ffmpeg_exe,
                     ogg_quality=ogg_quality,
                 )
@@ -861,7 +932,7 @@ def materialize_retained_slices(
                             )
                         )
         else:
-            for src, dst in copy_jobs:
+            for src, dst, _eff_swap in copy_jobs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
                 copied_files.append(dst)
@@ -870,10 +941,10 @@ def materialize_retained_slices(
     if transcode_jobs:
         max_workers = min(8, os.cpu_count() or 4, len(transcode_jobs))
 
-        def _transcode_one(pair: Tuple[Path, Path]) -> Tuple[Path, Optional[str]]:
-            src, dst = pair
+        def _transcode_one(job: Tuple[Path, Path, bool]) -> Tuple[Path, Optional[str]]:
+            src, dst, eff_swap = job
             dst.parent.mkdir(parents=True, exist_ok=True)
-            do_swap = bool(swap_lr and _get_audio_channels(src, ffmpeg_exe) != 1)
+            do_swap = bool(eff_swap and _get_audio_channels(src, ffmpeg_exe) != 1)
             sf_err: Optional[str] = None
             try:
                 _write_audio_via_soundfile(src, dst, swap_lr=do_swap)

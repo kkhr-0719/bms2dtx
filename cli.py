@@ -59,6 +59,13 @@ def _load_mapping_json(path: Path) -> MappingConfig:
         separate_lbd=bool(data.get("separate_lbd", False)),
         default_bind_mode=str(data.get("default_bind_mode", "manual")),
         auto_lp=parse_auto_lp_config(data.get("auto_lp")),
+        swapped_wav_ids=[
+            str(x).strip()
+            for x in data.get("swapped_wav_ids", [])
+            if str(x).strip()
+        ]
+        if isinstance(data.get("swapped_wav_ids"), list)
+        else [],
     )
 
 

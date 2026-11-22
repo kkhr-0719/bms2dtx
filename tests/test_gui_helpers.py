@@ -699,7 +699,10 @@ class AppIntegrationTests(ChartCase):
         titles = [self.app.tab_buttons[s.tab_id].cget("text") for s in TAB_SPECS]
         self.assertEqual(titles, [s.label for s in TAB_SPECS])
         self.assertEqual(str(self.app.left_tree.cget("selectmode")), "extended")
-        self.assertEqual(tuple(self.app.left_tree.cget("columns")), ("id", "filename", "count", "target"))
+        self.assertEqual(
+            tuple(self.app.left_tree.cget("columns")),
+            ("id", "filename", "count", "target", "lr"),
+        )
         for tab, panel in self.app.panels.items():
             self.assertEqual(str(panel.listbox.cget("selectmode")), "extended")
             self.assertEqual(panel.combo is not None, tab_has_bind_combobox(tab))
@@ -959,7 +962,7 @@ class AppIntegrationTests(ChartCase):
         from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
         from gui.i18n import TRANSLATIONS, get_language, tr
 
-        self.assertEqual(APP_VERSION, "0.4.0")
+        self.assertEqual(APP_VERSION, "0.4.1")
 
         # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
         base_keys = set(TRANSLATIONS["zh_CN"].keys())
@@ -988,7 +991,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(loc_present[1], "__bms2dtx.json")
 
         # 3) Verify GUI title bar, TabId.LP dual-row widgets, Spinbox enable/disable, 1000ms tooltip, Undo/Redo.
-        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.0"))
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.1"))
         self.app.select_tab(TabId.LP)
         self.root.update()
 
@@ -1178,19 +1181,24 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(bad_sd.played, [])
         self.assertTrue(any("stereo_lr.wav" in s for s in bad_statuses))
 
-    def test_v040_win32_64bit_drag_drop_hook_pms_and_settings_language_label(self) -> None:
-        import ctypes
-        import sys
+    def test_v041_tkdnd_drag_drop_crash_log_per_slice_lr_xor_and_settings_language_label(self) -> None:
         import tkinter as tk
+        from gui.crash_log import (
+            attach_tk_crash_handler,
+            close_crash_handlers,
+            install_crash_handlers,
+            write_crash_entry,
+        )
         from gui.i18n import TRANSLATIONS, get_language, set_language
+        self.addCleanup(close_crash_handlers)
 
-        # 1) Setting dialog language label must stay fixed as "🌐 Language:" in all 3 languages
+        # 1) Setting dialog language label must stay fixed as "🌐 Language:" and include Open Logs button
         orig_lang = get_language()
         self.addCleanup(lambda: set_language(orig_lang))
         for lang in ("zh_CN", "en", "ja"):
             self.assertEqual(TRANSLATIONS[lang]["lang_label"], "🌐 Language:")
 
-        def _walk_labels(widget) -> List[str]:
+        def _walk_texts(widget) -> List[str]:
             out: List[str] = []
             try:
                 txt = str(widget.cget("text"))
@@ -1199,7 +1207,7 @@ class AppIntegrationTests(ChartCase):
             except Exception:
                 pass
             for ch in widget.winfo_children():
-                out.extend(_walk_labels(ch))
+                out.extend(_walk_texts(ch))
             return out
 
         for lang in ("zh_CN", "en", "ja"):
@@ -1212,40 +1220,122 @@ class AppIntegrationTests(ChartCase):
                 dialogs = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
                 self.assertTrue(dialogs)
                 dlg = dialogs[-1]
-                labels = _walk_labels(dlg)
-                self.assertIn("🌐 Language:", labels)
+                texts = _walk_texts(dlg)
+                self.assertIn("🌐 Language:", texts)
+                self.assertIn(TRANSLATIONS[lang]["settings_open_logs_btn"], texts)
                 dlg.destroy()
 
-        # 2) Verify Win32 64-bit drag-drop hook attachment, argtypes/restype, teardown & .pms / invalid drop
-        if sys.platform == "win32":
-            user32 = ctypes.windll.user32
-            shell32 = ctypes.windll.shell32
-            set_wndproc = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
-            self.assertIsNotNone(self.app._dnd_hwnd)
-            self.assertIsNotNone(self.app._wndproc_ref)
-            self.assertIs(set_wndproc.restype, ctypes.c_void_p)
-            self.assertIs(user32.CallWindowProcW.restype, ctypes.c_ssize_t)
-            self.assertEqual(tuple(shell32.DragQueryFileW.argtypes)[0], ctypes.c_void_p)
-            self.assertEqual(tuple(shell32.DragFinish.argtypes), (ctypes.c_void_p,))
+        # 2) Verify dual-layer crash log initialization, 1 MB truncation, and Tk callback exception hook
+        log_file = self.tmp / "crash_test.log"
+        log_file.write_bytes(b"X" * 1_200_000 + b"\nkeep_tail_line\n")
+        installed = install_crash_handlers(log_file, max_bytes=1_048_576)
+        self.assertEqual(installed, log_file)
+        self.assertLessEqual(log_file.stat().st_size, 1_048_576)
+        try:
+            raise ValueError("synthetic crash test")
+        except ValueError as exc:
+            write_crash_entry(type(exc), exc, exc.__traceback__, context="unit_test", log_path=log_file)
+        log_text = log_file.read_text(encoding="utf-8")
+        self.assertIn("bms2dtx 0.4.1", log_text)
+        self.assertIn("ValueError: synthetic crash test", log_text)
 
-            # Re-hook / teardown round-trip on real Tk window must not crash
-            self.app._teardown_windows_drag_drop()
-            self.assertIsNone(self.app._dnd_hwnd)
-            self.app._setup_windows_drag_drop()
-            self.assertIsNotNone(self.app._dnd_hwnd)
+        alerted: list[tuple[Path, str]] = []
+        attach_tk_crash_handler(
+            self.root,
+            show_dialog=True,
+            log_path=log_file,
+            dialog_callback=lambda p, e: alerted.append((p, str(e))),
+        )
+        try:
+            raise RuntimeError("tk callback boom")
+        except RuntimeError as exc:
+            self.root.report_callback_exception(type(exc), exc, exc.__traceback__)
+        self.assertEqual(len(alerted), 1)
+        self.assertIn("tk callback boom", alerted[0][1])
+        self.assertIn("RuntimeError: tk callback boom", log_file.read_text(encoding="utf-8"))
 
-        # Dropping unsupported file or directory shows warning without crashing
+        # 3) Verify tkinterdnd2 registration, path splitting with spaces & CJK, invalid & .pms drop
+        self.assertTrue(self.app._tkdnd_ready)
+        split_paths = self.app._split_dnd_paths(
+            "{C:/My Charts/日本語 曲包/track 01.bms} {D:/简体中文 谱面/hold song.bml} E:/plain/nine.pms"
+        )
+        self.assertEqual(
+            split_paths,
+            [
+                "C:/My Charts/日本語 曲包/track 01.bms",
+                "D:/简体中文 谱面/hold song.bml",
+                "E:/plain/nine.pms",
+            ],
+        )
+
         bad_txt = self.tmp / "notes.txt"
         bad_txt.write_text("hi", encoding="utf-8")
         with mock.patch.object(self.app_mod.messagebox, "showwarning") as warn_mock:
             self.app._handle_dropped_files([str(bad_txt)])
             warn_mock.assert_called_once()
 
-        # Dropping .pms loads cleanly without warning
+        # 4) Verify per-slice L/R column (✓/✗), ⇄ L/R button, XOR with global Swap L/R, auto-preview, Undo/Redo & JSON
+        self.assertFalse(self.app.swap_lr_var.get())
+        row_01 = self.app.left_tree.item("01", "values")
+        self.assertEqual(row_01[4], "✗")
+
+        # Select slice "01" on left tree and click ⇄ L/R -> auto-previews with swap_lr=True, L/R col becomes ✓
+        self.app.auto_preview_var.set(True)
+        self.app.left_tree.selection_set(("01",))
+        self.app._set_focus_side("left")
+        with mock.patch.object(self.app.player, "play", return_value=True) as play_mock:
+            self.app.on_toggle_slice_lr()
+            play_mock.assert_called_once()
+            self.assertTrue(play_mock.call_args.kwargs.get("swap_lr"))
+
+        self.assertTrue(self.app.dirty)
+        self.assertIn("01", self.app.model.swapped_wav_ids)
+        self.assertEqual(self.app.left_tree.item("01", "values")[4], "✓")
+        self.assertEqual(self.app.left_tree.item("02", "values")[4], "✗")
+
+        # Toggling global Swap L/R checkbox inverts effective state across entire L/R column via XOR!
+        self.app.swap_lr_var.set(True)
+        self.app._on_swap_lr_toggled()
+        self.assertEqual(self.app.left_tree.item("01", "values")[4], "✗")  # True ^ True == False
+        self.assertEqual(self.app.left_tree.item("02", "values")[4], "✓")  # True ^ False == True
+
+        self.app.swap_lr_var.set(False)
+        self.app._on_swap_lr_toggled()
+        self.assertEqual(self.app.left_tree.item("01", "values")[4], "✓")
+
+        # Assign "02" to SD tab, select it in the right tab listbox, and toggle via ⇄ L/R
+        self.app.left_tree.selection_set(("02",))
+        self.app.select_tab(TabId.SD)
+        self.app.on_add()
+        sd_panel = self.app.panels[TabId.SD]
+        sd_panel.listbox.selection_set(0)
+        self.app._set_focus_side("right")
+        self.app.on_toggle_slice_lr()
+        self.assertIn("02", self.app.model.swapped_wav_ids)
+        self.assertEqual(self.app.left_tree.item("02", "values")[4], "✓")
+
+        # JSON round-trip preserves swapped_wav_ids
+        json_dict = self.app.model.to_json_dict()
+        self.assertEqual(json_dict["swapped_wav_ids"], ["01", "02"])
+
+        # Undo reverts "02" L/R toggle; Redo restores it
+        self.assertTrue(self.app.on_undo())
+        self.assertNotIn("02", self.app.model.swapped_wav_ids)
+        self.assertEqual(self.app.left_tree.item("02", "values")[4], "✗")
+        self.assertTrue(self.app.on_redo())
+        self.assertIn("02", self.app.model.swapped_wav_ids)
+        self.assertEqual(self.app.left_tree.item("02", "values")[4], "✓")
+
+        # Dropping .pms via tkdnd event handler loads cleanly
         pms_file = self.tmp / "chart_9k.pms"
         pms_file.write_text("#TITLE PMS Drop\n#BPM 130\n#WAV01 kick.wav\n#00111:01\n", encoding="utf-8")
+
+        class _FakeDropEvent:
+            data = f"{{{pms_file}}}"
+            action = "copy"
+
         with mock.patch.object(self.app_mod.messagebox, "showwarning") as warn_mock:
-            self.app._handle_dropped_files([str(pms_file)])
+            self.app._on_tkdnd_drop(_FakeDropEvent())
             for _ in range(200):
                 self.root.update()
                 if not self.app._busy and self.app.chart and self.app.chart.source_path == pms_file:

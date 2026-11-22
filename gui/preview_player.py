@@ -289,7 +289,7 @@ class PreviewPlayer:
         return self._temp_dir
 
     # --------------------------------------------------------------------- API
-    def play(self, src: Path | str) -> bool:
+    def play(self, src: Path | str, *, swap_lr: Optional[bool] = None) -> bool:
         """Start previewing ``src``; returns False if it cannot even be attempted."""
         src_path = Path(src)
         if self._closed:
@@ -306,7 +306,7 @@ class PreviewPlayer:
             gen = self._generation
         self._purge()
 
-        swap_lr = bool(self._swap_lr_getter())
+        swap_lr = bool(self._swap_lr_getter()) if swap_lr is None else bool(swap_lr)
 
         if self._use_legacy_decoder:
             ffmpeg = self._ffmpeg_getter()

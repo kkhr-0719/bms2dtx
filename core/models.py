@@ -181,6 +181,7 @@ class MappingConfig:
     separate_lbd: bool = False  # False => sync BD default bind to lane 03 LBD sub-slot when LBD unbound
     default_bind_mode: str = "manual"  # "manual" | "auto"
     auto_lp: AutoLpConfig = field(default_factory=AutoLpConfig)
+    swapped_wav_ids: List[str] = field(default_factory=list)
 
 
 @dataclass

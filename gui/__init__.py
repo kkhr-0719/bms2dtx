@@ -3,4 +3,4 @@
 __all__ = ["APP_NAME", "APP_VERSION"]
 
 APP_NAME = "bms2dtx"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"

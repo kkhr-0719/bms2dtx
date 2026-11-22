@@ -41,6 +41,7 @@ from core import (
 
 from . import APP_NAME, APP_VERSION
 from .auto_guess import guess_assignments
+from .crash_log import attach_tk_crash_handler, get_crash_log_dir, install_crash_handlers
 from .helpers import (
     AUTO_BIND_SENTINEL,
     GRAY_FOREGROUND,
@@ -645,11 +646,9 @@ class App:
         self.dirty: bool = False
 
         self._icon_image: Optional[tk.PhotoImage] = None
-        self._dnd_hwnd: Optional[int] = None
-        self._orig_wndproc: Optional[int] = None
-        self._wndproc_ref: Any = None
-        self._set_wndproc_fn: Any = None
+        self._tkdnd_ready: bool = False
 
+        attach_tk_crash_handler(root, show_dialog=self.startup_dialogs)
         self._update_window_title()
         self._apply_window_icon()
         self._setup_fonts_and_geometry()
@@ -665,7 +664,7 @@ class App:
         self._build_ui()
         self._bind_hotkeys()
         self.detect_ffmpeg()
-        self._setup_windows_drag_drop()
+        self._setup_drag_drop()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_id: Optional[str] = root.after(80, self._poll_queue)
 
@@ -734,124 +733,41 @@ class App:
         self.root.geometry(f"{width}x{height}")
         self.root.minsize(min(int(960 * scale), width), min(int(640 * scale), height))
 
-    def _setup_windows_drag_drop(self) -> None:
-        """Register 64-bit-safe native Win32 WM_DROPFILES hook via ctypes."""
-        if sys.platform != "win32":
-            return
+    def _setup_drag_drop(self) -> None:
+        """Register native file drag-and-drop via tkinterdnd2 (tkdnd C extension)."""
+        self._tkdnd_ready = False
         try:
-            import ctypes
-            from ctypes import wintypes
+            from tkinterdnd2 import DND_FILES, TkinterDnD
 
-            self.root.update_idletasks()
-            raw_hwnd = self.root.winfo_id()
-            if not raw_hwnd:
-                return
-
-            user32 = ctypes.windll.user32
-            shell32 = ctypes.windll.shell32
-
-            handle_t = ctypes.c_void_p
-            lresult_t = ctypes.c_ssize_t
-            wparam_t = ctypes.c_size_t
-            lparam_t = ctypes.c_ssize_t
-
-            user32.GetParent.argtypes = (handle_t,)
-            user32.GetParent.restype = handle_t
-            parent_hwnd = user32.GetParent(handle_t(raw_hwnd))
-            top_hwnd = int(parent_hwnd) if parent_hwnd else int(raw_hwnd)
-
-            shell32.DragAcceptFiles.argtypes = (handle_t, wintypes.BOOL)
-            shell32.DragAcceptFiles.restype = None
-            shell32.DragQueryFileW.argtypes = (
-                handle_t,
-                wintypes.UINT,
-                wintypes.LPWSTR,
-                wintypes.UINT,
-            )
-            shell32.DragQueryFileW.restype = wintypes.UINT
-            shell32.DragFinish.argtypes = (handle_t,)
-            shell32.DragFinish.restype = None
-
-            wndproc_t = ctypes.WINFUNCTYPE(
-                lresult_t, handle_t, wintypes.UINT, wparam_t, lparam_t
-            )
-            set_wndproc = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
-            set_wndproc.argtypes = (handle_t, ctypes.c_int, handle_t)
-            set_wndproc.restype = handle_t
-            call_wndproc = user32.CallWindowProcW
-            call_wndproc.argtypes = (
-                handle_t,
-                handle_t,
-                wintypes.UINT,
-                wparam_t,
-                lparam_t,
-            )
-            call_wndproc.restype = lresult_t
-            def_wndproc = user32.DefWindowProcW
-            def_wndproc.argtypes = (handle_t, wintypes.UINT, wparam_t, lparam_t)
-            def_wndproc.restype = lresult_t
-
-            gwlp_wndproc = -4
-            wm_dropfiles = 0x0233
-            shell32.DragAcceptFiles(handle_t(top_hwnd), True)
-
-            def _wndproc(hwnd: Any, msg: int, wparam: int, lparam: int) -> int:
-                try:
-                    if msg == wm_dropfiles:
-                        hdrop = handle_t(wparam)
-                        paths: List[str] = []
-                        try:
-                            count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
-                            for idx in range(count):
-                                buf_len = shell32.DragQueryFileW(hdrop, idx, None, 0)
-                                if buf_len > 0:
-                                    buf = ctypes.create_unicode_buffer(buf_len + 2)
-                                    shell32.DragQueryFileW(hdrop, idx, buf, buf_len + 2)
-                                    if buf.value:
-                                        paths.append(buf.value)
-                        finally:
-                            shell32.DragFinish(hdrop)
-                        if paths:
-                            self.root.after(
-                                0, lambda dropped=paths: self._handle_dropped_files(dropped)
-                            )
-                        return 0
-                    orig = self._orig_wndproc
-                    if orig:
-                        return int(call_wndproc(handle_t(orig), hwnd, msg, wparam, lparam))
-                    return int(def_wndproc(hwnd, msg, wparam, lparam))
-                except Exception:
-                    return 0
-
-            cb = wndproc_t(_wndproc)
-            cb_addr = ctypes.cast(cb, ctypes.c_void_p).value
-            if not cb_addr:
-                return
-            orig_proc = set_wndproc(handle_t(top_hwnd), gwlp_wndproc, handle_t(cb_addr))
-            self._dnd_hwnd = int(top_hwnd)
-            self._orig_wndproc = int(orig_proc) if orig_proc else None
-            self._wndproc_ref = cb
-            self._set_wndproc_fn = set_wndproc
-        except Exception:
-            self._dnd_hwnd = None
-            self._orig_wndproc = None
-            self._wndproc_ref = None
-
-    def _teardown_windows_drag_drop(self) -> None:
-        if self._dnd_hwnd and self._orig_wndproc and self._set_wndproc_fn:
-            try:
-                import ctypes
-
-                self._set_wndproc_fn(
-                    ctypes.c_void_p(self._dnd_hwnd),
-                    -4,
-                    ctypes.c_void_p(self._orig_wndproc),
+            if not isinstance(self.root, TkinterDnD.DnDWrapper):
+                self.root.__class__ = type(
+                    "TkWithDnD", (self.root.__class__, TkinterDnD.DnDWrapper), {}
                 )
-            except Exception:
-                pass
-        self._dnd_hwnd = None
-        self._orig_wndproc = None
-        self._wndproc_ref = None
+            self.root.TkdndVersion = TkinterDnD._require(self.root)
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind("<<Drop>>", self._on_tkdnd_drop)
+            self._tkdnd_ready = True
+        except Exception:
+            self._tkdnd_ready = False
+
+    def _split_dnd_paths(self, raw_data: Any) -> List[str]:
+        """Parse tkdnd drop event data into individual file paths (handling spaces & CJK)."""
+        if not raw_data:
+            return []
+        text = str(raw_data).strip()
+        if not text:
+            return []
+        try:
+            parts = self.root.tk.splitlist(text)
+            return [str(p).strip() for p in parts if str(p).strip()]
+        except Exception:
+            return [text]
+
+    def _on_tkdnd_drop(self, event: Any) -> Any:
+        paths = self._split_dnd_paths(getattr(event, "data", ""))
+        if paths:
+            self.root.after(0, lambda dropped=paths: self._handle_dropped_files(dropped))
+        return getattr(event, "action", None)
 
     def _handle_dropped_files(self, paths: Sequence[str]) -> None:
         if not paths or self._busy:
@@ -994,18 +910,19 @@ class App:
         )
         self.only_used_chk.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
-        # 4-column ttk.Treeview: ID | Filename | Count | Target
+        # 5-column ttk.Treeview: ID | Filename | Count | Target | L/R
         self.left_tree = ttk.Treeview(
             self.left_frame,
-            columns=("id", "filename", "count", "target"),
+            columns=("id", "filename", "count", "target", "lr"),
             show="headings",
             selectmode="extended",
         )
         s = self._dpi_scale
-        self.left_tree.column("id", width=int(58 * s), minwidth=44, stretch=False, anchor="w")
-        self.left_tree.column("filename", width=int(240 * s), minwidth=110, stretch=True, anchor="w")
-        self.left_tree.column("count", width=int(54 * s), minwidth=44, stretch=False, anchor="e")
-        self.left_tree.column("target", width=int(78 * s), minwidth=58, stretch=False, anchor="w")
+        self.left_tree.column("id", width=int(56 * s), minwidth=44, stretch=False, anchor="w")
+        self.left_tree.column("filename", width=int(200 * s), minwidth=100, stretch=True, anchor="w")
+        self.left_tree.column("count", width=int(52 * s), minwidth=42, stretch=False, anchor="e")
+        self.left_tree.column("target", width=int(74 * s), minwidth=54, stretch=False, anchor="w")
+        self.left_tree.column("lr", width=int(42 * s), minwidth=36, stretch=False, anchor="center")
         self._apply_tree_headings()
 
         self.left_tree.tag_configure("assigned", foreground=GRAY_FOREGROUND)
@@ -1067,12 +984,13 @@ class App:
         self.left_tree.heading("filename", text=tr("col_filename"), anchor="w")
         self.left_tree.heading("count", text=tr("col_count"), anchor="e")
         self.left_tree.heading("target", text=tr("col_target"), anchor="w")
+        self.left_tree.heading("lr", text=tr("col_lr"), anchor="center")
 
     def _build_center(self, parent: ttk.Frame) -> None:
         center = ttk.Frame(parent, padding=(8, 0))
         center.grid(row=0, column=1, sticky="ns")
         center.rowconfigure(0, weight=1)
-        center.rowconfigure(6, weight=1)
+        center.rowconfigure(7, weight=1)
         btn_kw = dict(width=12, pady=6, relief="raised", borderwidth=2, cursor="hand2")
         self.add_btn = tk.Button(
             center,
@@ -1096,11 +1014,18 @@ class App:
             **btn_kw,
         )
         self.remove_btn.grid(row=2, column=0, pady=4)
-        ttk.Separator(center, orient="horizontal").grid(row=3, column=0, sticky="ew", pady=8)
+        self.swap_slice_lr_btn = ttk.Button(
+            center, text=tr("swap_slice_lr_btn"), command=self.on_toggle_slice_lr
+        )
+        self.swap_slice_lr_btn.grid(row=3, column=0, sticky="ew", pady=4)
+        self._swap_slice_lr_tip = _Tooltip(
+            self.swap_slice_lr_btn, lambda: tr("swap_slice_lr_tooltip")
+        )
+        ttk.Separator(center, orient="horizontal").grid(row=4, column=0, sticky="ew", pady=8)
         self.guess_btn = ttk.Button(center, text=tr("guess_btn"), command=self.on_guess)
-        self.guess_btn.grid(row=4, column=0, sticky="ew", pady=2)
+        self.guess_btn.grid(row=5, column=0, sticky="ew", pady=2)
         self.clear_btn = ttk.Button(center, text=tr("clear_all_btn"), command=self.on_clear_all)
-        self.clear_btn.grid(row=5, column=0, sticky="ew", pady=2)
+        self.clear_btn.grid(row=6, column=0, sticky="ew", pady=2)
 
     def _build_right(self, parent: ttk.Frame) -> None:
         self.right_frame = ttk.LabelFrame(parent, text=tr("right_frame_title"), padding=6)
@@ -1258,6 +1183,8 @@ class App:
         self.model.swap_lr = bool(self.swap_lr_var.get())
         if self._persist_settings:
             save_app_settings({"swap_lr": self.model.swap_lr}, self.config_path)
+        self._update_dirty_flag()
+        self.refresh_left()
 
     # ---------------------------------------------------- settings & i18n
     def change_language(self, lang_code: str) -> None:
@@ -1290,6 +1217,7 @@ class App:
 
         self.add_btn.configure(text=tr("add_btn"))
         self.remove_btn.configure(text=tr("remove_btn"))
+        self.swap_slice_lr_btn.configure(text=tr("swap_slice_lr_btn"))
         self.guess_btn.configure(text=tr("guess_btn"))
         self.clear_btn.configure(text=tr("clear_all_btn"))
 
@@ -1528,10 +1456,22 @@ class App:
                 self.set_status(tr("status_ffmpeg_enabled", path=self.ffmpeg_path))
             top.destroy()
 
+        ttk.Button(
+            btns, text=tr("settings_open_logs_btn"), command=self.open_logs_folder
+        ).pack(side="left")
         ttk.Button(btns, text=tr("settings_cancel_btn"), command=top.destroy).pack(side="right")
         ttk.Button(btns, text=tr("settings_save_btn"), command=_save_and_close).pack(
             side="right", padx=(0, 8)
         )
+
+    def open_logs_folder(self) -> None:
+        log_dir = get_crash_log_dir()
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        self.open_folder(log_dir)
+        self.set_status(tr("status_logs_opened", path=log_dir))
 
     # ------------------------------------------------- right tab grid switcher
     def visible_tabs(self) -> List[TabId]:
@@ -1950,6 +1890,7 @@ class App:
                 assigned_groups += 1
 
         to_select: List[str] = []
+        global_swap = bool(self.swap_lr_var.get())
         for wid in self._left_ids:
             tab = owner.get(wid)
             entry = self.chart.wavs[wid]
@@ -1958,6 +1899,9 @@ class App:
                 tab,
                 chart=self.chart,
                 group_ids=rep_to_group.get(wid),
+                effective_swap_lr=self.model.is_effective_swap_lr(
+                    wid, global_swap_lr=global_swap
+                ),
             )
             if tab is not None:
                 tags: tuple[str, ...] = ("assigned",)
@@ -2021,8 +1965,33 @@ class App:
             tr("status_removed_from_tab", removed=len(removed), tab=tab_label(tab))
         )
 
+    def on_toggle_slice_lr(self) -> None:
+        """Toggle per-slice L/R swap override for selected slice(s) in left or right list."""
+        if self.chart is None:
+            return
+        left_ids = self.selected_left_ids()
+        right_ids = self.panels[self.active_tab()].selected_ids()
+        if self._last_focus_side == "right" and right_ids:
+            target_ids = right_ids
+        elif left_ids:
+            target_ids = left_ids
+        elif right_ids:
+            target_ids = right_ids
+        else:
+            self.set_status(tr("status_select_slice_first"))
+            return
+        before = self.model.snapshot()
+        toggled = self.model.toggle_slice_swap_lr(target_ids, chart=self.chart)
+        if not toggled:
+            return
+        self._commit_undo(before)
+        self.refresh_left()
+        self.set_status(tr("status_slice_lr_toggled", count=len(target_ids)))
+        if len(target_ids) == 1 and self.auto_preview_var.get():
+            self._play_wav_id(target_ids[0])
+
     def on_clear_all(self) -> None:
-        if self.chart is None or not self.model.has_assignments:
+        if self.chart is None or (not self.model.has_assignments and not self.model.swapped_wav_ids):
             return
         if not messagebox.askyesno(
             tr("dialog_clear_title"), tr("dialog_clear_body"), parent=self.root
@@ -2082,7 +2051,13 @@ class App:
         if entry is None or not entry.exists or entry.resolved_path is None:
             self.set_status(tr("status_file_missing_no_preview", wav_id=wav_id))
             return
-        self.player.play(entry.resolved_path)
+        if self.model.is_slice_swap_override(wav_id):
+            eff_swap = self.model.is_effective_swap_lr(
+                wav_id, global_swap_lr=bool(self.swap_lr_var.get())
+            )
+            self.player.play(entry.resolved_path, swap_lr=eff_swap)
+        else:
+            self.player.play(entry.resolved_path)
 
     def _on_left_click_index(self, idx: int) -> None:
         if not self.auto_preview_var.get() or self.chart is None:
@@ -2374,7 +2349,6 @@ class App:
             ):
                 return
         try:
-            self._teardown_windows_drag_drop()
             self.player.shutdown()
             if self._poll_id is not None:
                 try:
@@ -2387,10 +2361,16 @@ class App:
 
 
 def run(argv: Optional[List[str]] = None) -> int:
+    install_crash_handlers()
     args = list(sys.argv[1:] if argv is None else argv)
     initial = next((a for a in args if not a.startswith("-")), None)
     enable_hidpi()
-    root = tk.Tk()
+    try:
+        from tkinterdnd2 import TkinterDnD
+
+        root = TkinterDnD.Tk()
+    except Exception:
+        root = tk.Tk()
     App(root, initial)
     root.mainloop()
     return 0

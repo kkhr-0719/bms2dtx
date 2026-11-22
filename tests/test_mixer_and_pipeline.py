@@ -1252,6 +1252,97 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertLess(float(np.max(np.abs(sn_data[:, 0]))), 0.02)
             self.assertGreater(float(np.max(np.abs(sn_data[:, 1]))), 0.2)
 
+    def test_per_slice_swapped_wav_ids_xor_with_global_swap_lr_in_bgm_and_retained(self) -> None:
+        import json
+        import numpy as np
+        import soundfile as sf
+        from cli import _load_mapping_json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            sr = 44100
+            t = np.arange(int(sr * 0.1), dtype=np.float32) / sr
+            tone = (0.4 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+            left_only = np.column_stack([tone, np.zeros_like(tone)])
+
+            # 4 stereo files, all Left-channel only in source
+            for name in ("bgm_a.wav", "bgm_b.wav", "drum_a.wav", "drum_b.wav"):
+                sf.write(str(src / name), left_only, sr, format="WAV", subtype="PCM_16")
+
+            bms = src / "xor_lr.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE XorLR",
+                        "#BPM 120",
+                        "#WAV01 bgm_a.wav",
+                        "#WAV02 bgm_b.wav",
+                        "#WAV03 drum_a.wav",
+                        "#WAV04 drum_b.wav",
+                        "#00101:0100",
+                        "#00201:0200",
+                        "#00111:0304",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            # Case 1: global swap_lr=False, swapped_wav_ids=["01", "03"]
+            # -> 01 (M001 at 2.0s in bgm.ogg) & 03 (drum_a.wav) are swapped to Right;
+            # -> 02 (M002 at 4.0s in bgm.ogg) & 04 (drum_b.wav) stay on Left!
+            out1 = root / "out1"
+            res1 = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out1, swap_lr=False, render_bgm=True),
+                mapping=MappingConfig(
+                    tab_wavs={TabId.SD: ["03"], TabId.BD: ["04"]},
+                    swapped_wav_ids=["01", "03"],
+                ),
+            )
+            bgm1, _ = sf.read(str(out1 / "bgm.ogg"), dtype="float32", always_2d=True)
+            m1_idx = int(2.0 * sr)
+            m2_idx = int(4.0 * sr)
+            # M001 (wav 01, swapped -> R > L)
+            self.assertLess(float(np.max(np.abs(bgm1[m1_idx : m1_idx + 1000, 0]))), 0.03)
+            self.assertGreater(float(np.max(np.abs(bgm1[m1_idx : m1_idx + 1000, 1]))), 0.2)
+            # M002 (wav 02, unswapped -> L > R)
+            self.assertGreater(float(np.max(np.abs(bgm1[m2_idx : m2_idx + 1000, 0]))), 0.2)
+            self.assertLess(float(np.max(np.abs(bgm1[m2_idx : m2_idx + 1000, 1]))), 0.03)
+
+            da1, _ = sf.read(str(out1 / "drum_a.wav"), dtype="float32", always_2d=True)
+            db1, _ = sf.read(str(out1 / "drum_b.wav"), dtype="float32", always_2d=True)
+            self.assertLess(float(np.max(np.abs(da1[:, 0]))), 0.01)
+            self.assertGreater(float(np.max(np.abs(da1[:, 1]))), 0.2)
+            self.assertGreater(float(np.max(np.abs(db1[:, 0]))), 0.2)
+            self.assertLess(float(np.max(np.abs(db1[:, 1]))), 0.01)
+
+            # Verify __bms2dtx.json round-trip via CLI _load_mapping_json
+            proj_data = json.loads(res1.project_json_path.read_text(encoding="utf-8"))
+            self.assertEqual(proj_data["swapped_wav_ids"], ["01", "03"])
+            cli_cfg = _load_mapping_json(res1.project_json_path)
+            self.assertEqual(cli_cfg.swapped_wav_ids, ["01", "03"])
+
+            # Case 2: global swap_lr=True, swapped_wav_ids=["01", "03"] (XOR inverts!)
+            # -> 01 & 03: True ^ True == False (stay on Left)
+            # -> 02 & 04: True ^ False == True (swapped to Right)
+            out2 = root / "out2"
+            convert_bms(
+                bms,
+                ConversionOptions(output_dir=out2, swap_lr=True, render_bgm=True),
+                mapping=MappingConfig(
+                    tab_wavs={TabId.SD: ["03"], TabId.BD: ["04"]},
+                    swapped_wav_ids=["01", "03"],
+                ),
+            )
+            da2, _ = sf.read(str(out2 / "drum_a.wav"), dtype="float32", always_2d=True)
+            db2, _ = sf.read(str(out2 / "drum_b.wav"), dtype="float32", always_2d=True)
+            self.assertGreater(float(np.max(np.abs(da2[:, 0]))), 0.2)
+            self.assertLess(float(np.max(np.abs(da2[:, 1]))), 0.01)
+            self.assertLess(float(np.max(np.abs(db2[:, 0]))), 0.01)
+            self.assertGreater(float(np.max(np.abs(db2[:, 1]))), 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()
