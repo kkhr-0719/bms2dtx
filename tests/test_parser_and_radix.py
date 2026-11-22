@@ -406,19 +406,20 @@ class TestStopAndRandomWarnings(unittest.TestCase):
             self.assertEqual(chart_pms.wavs["01"].use_count, 9)
             self.assertEqual(chart_pms.wavs["02"].use_count, 9)
 
-            # 2) .bml #LNTYPE 1 + #LNOBJ: LN start counted, LN end & LNOBJ end silent & excluded from use_count
+            # 2) .bml without explicit #LNTYPE header defaults to #LNTYPE 1;
+            #    #LNOBJ filters only visible key lanes (11-19/21-29) and never silences 01 BGM
             bml1 = root / "hold1.bml"
             bml1.write_text(
                 "\n".join(
                     [
                         "#TITLE BML1",
                         "#BPM 120",
-                        "#LNTYPE 1",
                         "#LNOBJ ZZ",
                         "#WAV01 start_ch51.wav",
                         "#WAV02 start_ch69.wav",
                         "#WAV03 body_obj.wav",
                         "#WAVZZ end_obj.wav",
+                        "#00101:ZZ00",
                         "#00151:0100",
                         "#00251:0100",
                         "#00169:0200",
@@ -430,6 +431,7 @@ class TestStopAndRandomWarnings(unittest.TestCase):
             )
             c1 = parse_bms(bml1)
             self.assertEqual([(e.channel, e.wav_id, e.is_ln_end) for e in c1.events], [
+                ("01", "ZZ", False),
                 ("51", "01", False),
                 ("69", "02", False),
                 ("11", "03", False),
@@ -439,7 +441,7 @@ class TestStopAndRandomWarnings(unittest.TestCase):
             self.assertEqual(c1.wavs["01"].use_count, 1)
             self.assertEqual(c1.wavs["02"].use_count, 1)
             self.assertEqual(c1.wavs["03"].use_count, 1)
-            self.assertEqual(c1.wavs["ZZ"].use_count, 0)
+            self.assertEqual(c1.wavs["ZZ"].use_count, 1)  # BGM 01 counted; 11 LNOBJ end excluded!
 
             # 3) .bml #LNTYPE 2: contiguous identical WAV triggers once, tail tokens marked as ln_end
             bml2 = root / "hold2.bml"

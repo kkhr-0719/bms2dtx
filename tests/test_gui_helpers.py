@@ -1055,14 +1055,16 @@ class AppIntegrationTests(ChartCase):
         import numpy as np
 
         class _FakeWasapiSettings:
-            def __init__(self, *, exclusive: bool = True) -> None:
+            def __init__(self, *, exclusive: bool = True, auto_convert: bool = False) -> None:
                 self.exclusive = exclusive
+                self.auto_convert = auto_convert
 
         class _FakeSoundDevice:
             WasapiSettings = _FakeWasapiSettings
 
-            def __init__(self, *, fail_no_device: bool = False) -> None:
+            def __init__(self, *, fail_no_device: bool = False, strict_48k_stereo: bool = False) -> None:
                 self.fail_no_device = fail_no_device
+                self.strict_48k_stereo = strict_48k_stereo
                 self.played: list[tuple[np.ndarray, dict]] = []
                 self.stopped = 0
 
@@ -1077,9 +1079,10 @@ class AppIntegrationTests(ChartCase):
             def query_devices(self, idx=None):
                 if self.fail_no_device:
                     return [] if idx is None else {"max_output_channels": 0}
+                dev = {"max_output_channels": 2, "default_samplerate": 48000.0}
                 if idx is None:
-                    return [{"max_output_channels": 2}] * 3
-                return {"max_output_channels": 2}
+                    return [dev] * 3
+                return dev
 
             @property
             def default(self):
@@ -1091,6 +1094,9 @@ class AppIntegrationTests(ChartCase):
                 self.stopped += 1
 
             def play(self, arr, **kwargs) -> None:
+                if self.strict_48k_stereo:
+                    if kwargs.get("samplerate") != 48000 or arr.ndim != 2 or arr.shape[1] != 2:
+                        raise RuntimeError("Invalid sample rate (-9997)")
                 self.played.append((arr.copy(), kwargs))
 
         stereo_wav = self.tmp / "stereo_lr.wav"
@@ -1126,9 +1132,36 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(kwargs["device"], 2)  # Explicit Windows WASAPI device
         self.assertIsInstance(kwargs["extra_settings"], _FakeWasapiSettings)
         self.assertFalse(kwargs["extra_settings"].exclusive)  # Shared mode forced!
+        self.assertTrue(kwargs["extra_settings"].auto_convert)  # auto_convert=True enabled!
         # L/R swapped in memory: original L had energy, R was 0 -> swapped L is ~0, R has energy
         self.assertLess(float(np.max(np.abs(arr[:, 0]))), 1e-4)
         self.assertGreater(float(np.max(np.abs(arr[:, 1]))), 0.1)
+
+        # Fallback resampling via soxr when device strictly requires 48000 Hz stereo and slice is 22050 Hz mono
+        mono_22k = self.tmp / "mono_22k.wav"
+        with wave.open(str(mono_22k), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(22050)
+            frames = bytearray()
+            for i in range(441):
+                val = int(10000 * math.sin(2 * math.pi * 440 * i / 22050))
+                frames.extend(struct.pack("<h", val))
+            wf.writeframes(bytes(frames))
+
+        strict_sd = _FakeSoundDevice(strict_48k_stereo=True)
+        player_strict = PreviewPlayer(
+            lambda: None,
+            winsound_module=None,
+            sounddevice_module=strict_sd,
+        )
+        self.addCleanup(player_strict.shutdown)
+        self.assertTrue(player_strict.play(mono_22k))
+        player_strict._last_thread.join(5)
+        self.assertEqual(len(strict_sd.played), 1)
+        arr_adapted, kw_adapted = strict_sd.played[0]
+        self.assertEqual(kw_adapted["samplerate"], 48000)
+        self.assertEqual(arr_adapted.shape[1], 2)
 
         # Safe degradation when no audio output device exists (never crashes)
         bad_sd = _FakeSoundDevice(fail_no_device=True)
