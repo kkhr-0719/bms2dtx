@@ -43,6 +43,11 @@ except ImportError:
     _sf = None  # type: ignore[assignment]
 
 try:  # pragma: no cover
+    import soxr as _soxr  # type: ignore
+except ImportError:
+    _soxr = None  # type: ignore[assignment]
+
+try:  # pragma: no cover
     os.environ.setdefault("PATH", "")
     import sounddevice as _sd  # type: ignore
 except Exception:
@@ -74,7 +79,12 @@ def _select_wasapi_shared_device(sd_mod: Any) -> Tuple[Optional[int], Any]:
                     wasapi_cls = getattr(sd_mod, "WasapiSettings", None)
                     if wasapi_cls is not None:
                         try:
-                            extra = wasapi_cls(exclusive=False)
+                            extra = wasapi_cls(exclusive=False, auto_convert=True)
+                        except TypeError:
+                            try:
+                                extra = wasapi_cls(exclusive=False)
+                            except Exception:
+                                extra = None
                         except Exception:
                             extra = None
                     return dev_idx, extra
@@ -96,6 +106,43 @@ def _select_wasapi_shared_device(sd_mod: Any) -> Tuple[Optional[int], Any]:
             return idx, None
 
     raise RuntimeError("No audio output device available")
+
+
+def _adapt_buffer_for_device(
+    arr: Any,
+    sr: int,
+    dev_info: Any,
+    *,
+    np_mod: Any,
+    soxr_mod: Any = _soxr,
+) -> Tuple[Any, int]:
+    """Fallback adapter: expand mono to stereo and resample to device default_samplerate."""
+    if np_mod is None or arr is None or len(arr) == 0:
+        return arr, sr
+    out = arr
+    max_ch = int((dev_info.get("max_output_channels", 0) if isinstance(dev_info, dict) else 0) or 0)
+    if max_ch >= 2 and getattr(out, "ndim", 0) == 2 and out.shape[1] == 1:
+        out = np_mod.ascontiguousarray(np_mod.repeat(out, 2, axis=1), dtype=np_mod.float32)
+
+    raw_dev_sr = dev_info.get("default_samplerate", 0) if isinstance(dev_info, dict) else 0
+    target_sr = int(round(float(raw_dev_sr or 0)))
+    if target_sr <= 0 or target_sr == sr:
+        return out, sr
+
+    if soxr_mod is not None:
+        try:
+            resampled = soxr_mod.resample(out, sr, target_sr, quality="HQ")
+            return np_mod.ascontiguousarray(resampled, dtype=np_mod.float32), target_sr
+        except Exception:
+            pass
+
+    out_len = max(1, int(round(len(out) * (target_sr / float(sr)))))
+    if len(out) == 1:
+        return np_mod.repeat(out.astype(np_mod.float32, copy=False), out_len, axis=0), target_sr
+    x_old = np_mod.linspace(0.0, 1.0, num=len(out), endpoint=False)
+    x_new = np_mod.linspace(0.0, 1.0, num=out_len, endpoint=False)
+    cols = [np_mod.interp(x_new, x_old, out[:, ch]) for ch in range(out.shape[1])]
+    return np_mod.ascontiguousarray(np_mod.column_stack(cols), dtype=np_mod.float32), target_sr
 
 
 def _decode_with_soundfile(
@@ -393,7 +440,17 @@ class PreviewPlayer:
                 }
                 if extra is not None:
                     kwargs["extra_settings"] = extra
-                self._sd.play(arr, **kwargs)
+                try:
+                    self._sd.play(arr, **kwargs)
+                except Exception:
+                    dev_info = self._sd.query_devices(dev_idx) if dev_idx is not None else {}
+                    adapted_arr, adapted_sr = _adapt_buffer_for_device(
+                        arr, sr, dev_info, np_mod=self._np
+                    )
+                    if not self._is_current(gen):
+                        return
+                    kwargs["samplerate"] = adapted_sr
+                    self._sd.play(adapted_arr, **kwargs)
                 self._status(tr("preview_playing", name=src.name))
                 return
             except Exception as exc:
