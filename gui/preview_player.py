@@ -61,51 +61,121 @@ Decoder = Callable[..., None]
 MAX_PREVIEW_SECONDS = 180
 
 
-def _select_wasapi_shared_device(sd_mod: Any) -> Tuple[Optional[int], Any]:
-    """Select Windows WASAPI default output device in Shared mode (exclusive=False).
+def _is_wdmks_host(name: Any) -> bool:
+    """Return True if host API name refers to Windows WDM-KS (explicitly blacklisted)."""
+    low = str(name or "").lower()
+    return "wdm-ks" in low or "wdmks" in low
 
-    Falls back to the PortAudio default output device when WASAPI is unavailable.
-    Raises RuntimeError if no output audio device exists at all.
-    """
-    hostapis = sd_mod.query_hostapis()
-    for host in hostapis:
-        name = str(host.get("name", "")).lower()
-        if "wasapi" in name:
-            dev_idx = int(host.get("default_output_device", -1))
-            if dev_idx >= 0:
-                dev_info = sd_mod.query_devices(dev_idx)
-                if int(dev_info.get("max_output_channels", 0)) > 0:
-                    extra = None
-                    wasapi_cls = getattr(sd_mod, "WasapiSettings", None)
-                    if wasapi_cls is not None:
-                        try:
-                            extra = wasapi_cls(exclusive=False, auto_convert=True)
-                        except TypeError:
-                            try:
-                                extra = wasapi_cls(exclusive=False)
-                            except Exception:
-                                extra = None
-                        except Exception:
-                            extra = None
-                    return dev_idx, extra
 
-    # Fallback to system default output device (non-WASAPI or non-Windows)
+def _build_wasapi_settings(sd_mod: Any) -> Any:
+    """Construct WasapiSettings(exclusive=False, auto_convert=True) when supported."""
+    wasapi_cls = getattr(sd_mod, "WasapiSettings", None)
+    if wasapi_cls is None:
+        return None
     try:
-        default_dev = sd_mod.default.device
-        out_idx = int(default_dev[1]) if isinstance(default_dev, (list, tuple)) else int(default_dev)
+        return wasapi_cls(exclusive=False, auto_convert=True)
+    except TypeError:
+        try:
+            return wasapi_cls(exclusive=False)
+        except Exception:
+            return None
     except Exception:
-        out_idx = -1
-    if out_idx >= 0:
-        dev_info = sd_mod.query_devices(out_idx)
-        if int(dev_info.get("max_output_channels", 0)) > 0:
-            return out_idx, None
+        return None
 
-    # Last scan for any output-capable device
-    for idx, dev in enumerate(sd_mod.query_devices()):
-        if int(dev.get("max_output_channels", 0)) > 0:
-            return idx, None
 
-    raise RuntimeError("No audio output device available")
+def _get_candidate_output_devices(
+    sd_mod: Any,
+) -> list[Tuple[str, int, dict[str, Any], Any]]:
+    """Build prioritized Windows output candidates: WASAPI Shared -> DirectSound -> MME.
+
+    Strictly excludes any ``Windows WDM-KS`` Host API or device.
+    """
+    hostapis = list(sd_mod.query_hostapis())
+    try:
+        all_devs_raw = list(sd_mod.query_devices())
+    except Exception:
+        all_devs_raw = []
+
+    def _safe_dev_info(idx: int) -> dict[str, Any]:
+        info = sd_mod.query_devices(idx)
+        return dict(info) if isinstance(info, dict) else {}
+
+    def _host_name_for_dev(dev_info: dict[str, Any]) -> str:
+        hidx = dev_info.get("hostapi")
+        if isinstance(hidx, int) and 0 <= hidx < len(hostapis):
+            return str(hostapis[hidx].get("name", ""))
+        return ""
+
+    candidates: list[Tuple[str, int, dict[str, Any], Any]] = []
+    seen_devs: set[int] = set()
+
+    # Priority 1: Windows WASAPI -> Priority 2: Windows DirectSound -> Priority 3: MME
+    priority_specs = (
+        ("wasapi", True),
+        ("directsound", False),
+        ("mme", False),
+    )
+    for token, is_wasapi in priority_specs:
+        for host in hostapis:
+            hname = str(host.get("name", ""))
+            if _is_wdmks_host(hname):
+                continue
+            if token not in hname.lower():
+                continue
+            dev_idx = int(host.get("default_output_device", -1))
+            if dev_idx < 0 or dev_idx in seen_devs:
+                continue
+            dev_info = _safe_dev_info(dev_idx)
+            if int(dev_info.get("max_output_channels", 0)) <= 0:
+                continue
+            dev_hname = _host_name_for_dev(dev_info) or hname
+            if _is_wdmks_host(dev_hname):
+                continue
+            extra = _build_wasapi_settings(sd_mod) if is_wasapi else None
+            seen_devs.add(dev_idx)
+            candidates.append((dev_hname, dev_idx, dev_info, extra))
+
+    if not candidates:
+        # Fallback for non-Windows or custom devices: still strictly skip WDM-KS
+        try:
+            default_dev = sd_mod.default.device
+            out_idx = (
+                int(default_dev[1])
+                if isinstance(default_dev, (list, tuple))
+                else int(default_dev)
+            )
+        except Exception:
+            out_idx = -1
+        if out_idx >= 0 and out_idx not in seen_devs:
+            dev_info = _safe_dev_info(out_idx)
+            hname = _host_name_for_dev(dev_info) or "Default"
+            if int(dev_info.get("max_output_channels", 0)) > 0 and not _is_wdmks_host(hname):
+                seen_devs.add(out_idx)
+                candidates.append((hname, out_idx, dev_info, None))
+
+        for idx, raw_dev in enumerate(all_devs_raw):
+            if idx in seen_devs or not isinstance(raw_dev, dict):
+                continue
+            hname = _host_name_for_dev(raw_dev) or f"Device {idx}"
+            if _is_wdmks_host(hname):
+                continue
+            if int(raw_dev.get("max_output_channels", 0)) > 0:
+                seen_devs.add(idx)
+                candidates.append((hname, idx, dict(raw_dev), None))
+
+    if not candidates:
+        raise RuntimeError(
+            "No audio output device available "
+            "(tried: Windows WASAPI, Windows DirectSound, MME; WDM-KS blacklisted)"
+        )
+    return candidates
+
+
+def _select_wasapi_shared_device(sd_mod: Any) -> Tuple[Optional[int], Any]:
+    """Return highest-priority safe output device (WASAPI Shared -> DirectSound -> MME)."""
+    candidates = _get_candidate_output_devices(sd_mod)
+    _host_name, dev_idx, _dev_info, extra = candidates[0]
+    return dev_idx, extra
 
 
 def _adapt_buffer_for_device(
@@ -116,11 +186,12 @@ def _adapt_buffer_for_device(
     np_mod: Any,
     soxr_mod: Any = _soxr,
 ) -> Tuple[Any, int]:
-    """Fallback adapter: expand mono to stereo and resample to device default_samplerate."""
+    """Expand mono to stereo (float32) and resample to device default_samplerate via soxr."""
     if np_mod is None or arr is None or len(arr) == 0:
         return arr, sr
     out = arr
-    max_ch = int((dev_info.get("max_output_channels", 0) if isinstance(dev_info, dict) else 0) or 0)
+    raw_max_ch = dev_info.get("max_output_channels", 2) if isinstance(dev_info, dict) else 2
+    max_ch = int(raw_max_ch if raw_max_ch is not None else 2)
     if max_ch >= 2 and getattr(out, "ndim", 0) == 2 and out.shape[1] == 1:
         out = np_mod.ascontiguousarray(np_mod.repeat(out, 2, axis=1), dtype=np_mod.float32)
 
@@ -429,30 +500,29 @@ class PreviewPlayer:
 
         if self._sd is not None:
             try:
-                dev_idx, extra = _select_wasapi_shared_device(self._sd)
-                if not self._is_current(gen):
-                    return
-                self._sd.stop()
-                kwargs: dict[str, Any] = {
-                    "samplerate": sr,
-                    "device": dev_idx,
-                    "blocking": False,
-                }
-                if extra is not None:
-                    kwargs["extra_settings"] = extra
-                try:
-                    self._sd.play(arr, **kwargs)
-                except Exception:
-                    dev_info = self._sd.query_devices(dev_idx) if dev_idx is not None else {}
-                    adapted_arr, adapted_sr = _adapt_buffer_for_device(
-                        arr, sr, dev_info, np_mod=self._np
-                    )
+                candidates = _get_candidate_output_devices(self._sd)
+                errors: list[str] = []
+                for host_name, dev_idx, dev_info, extra in candidates:
                     if not self._is_current(gen):
                         return
-                    kwargs["samplerate"] = adapted_sr
-                    self._sd.play(adapted_arr, **kwargs)
-                self._status(tr("preview_playing", name=src.name))
-                return
+                    play_arr, play_sr = _adapt_buffer_for_device(
+                        arr, sr, dev_info, np_mod=self._np
+                    )
+                    kwargs: dict[str, Any] = {
+                        "samplerate": play_sr,
+                        "device": dev_idx,
+                        "blocking": False,
+                    }
+                    if extra is not None:
+                        kwargs["extra_settings"] = extra
+                    try:
+                        self._sd.stop()
+                        self._sd.play(play_arr, **kwargs)
+                        self._status(tr("preview_playing", name=src.name))
+                        return
+                    except Exception as play_exc:
+                        errors.append(f"{host_name}: {play_exc}")
+                raise RuntimeError(f"All host APIs failed ({'; '.join(errors)})")
             except Exception as exc:
                 # Safe degradation when no audio device exists or PortAudio errors
                 if self._ws is not None and src.suffix.lower() == ".wav" and not swap_lr:

@@ -19,7 +19,7 @@
   - 永久保留 `#WAVZY` 与 `#WAVZZ` 槽位。当从开镲（`OHH / 18`）转为闭镲（`CHH / 11`）且间隔 `<=` 设定阈值（支持**乐理音符时值**如 `1/4` 或**物理毫秒 `ms`**），且期间及闭镲同拍位没有原谱 `LP` 时，自动在闭镲位补入 `1B` 音符（可选真实 LP 切片音量 `0..100` 写入 `ZY`，或生成 10ms 极短静音 `_silent_zz.wav` 写入 `ZZ`）。
 - **高质量离线混音与导出增强**：
   - 未选入 15-Tab 的全部剩余音符与同轨并发溢出音符，按精确时间轴离线混音导出为高质量 `bgm.ogg`（同拍同 ID 防相位爆音 + 仅向下峰值防削波保护）。
-  - 支持全局 **`左右声道互换 (Swap L/R)`** 与单切片 **`⇄ L/R`** 异或叠加（`effective_swap = bool(global_swap_lr) ^ bool(item_override)`，同步作用于试听、`bgm.ogg` 单切片解码阶段翻转、`#PREVIEW` 及保留立体声切片，单声道切片直拷零重编码）。
+  - 支持全局 **`左右声道互换 (Swap L/R)`**（仅作为单曲工程状态，启动与打开新谱面默认不勾选）与单切片 **`⇄ L/R`** 异或叠加（`effective_swap = bool(global_swap_lr) ^ bool(item_override)`，同步作用于试听、`bgm.ogg` 单切片解码阶段翻转、`#PREVIEW` 及保留立体声切片，单声道切片直拷零重编码）。
   - 支持原生 `#GENRE:`、`#PREVIEW` 两级发现、封面/背景图三档适配（原图直拷 / `204x269`+`640x480` 补黑边 / 不搬运）、实验性 BGA 视频/图片透传，以及 `#WAVxx` 行尾 `\t;<LABEL>` 注释自定义。
   - **内置工程自动存档与双层崩溃日志**：每次导出自动在输出目录生成 `__bms2dtx.json`（含分轨、默认芯片、`Auto-LP`、全局 `Swap L/R` 与单切片 `swapped_wav_ids` 参数），随时可用「载入映射 JSON...」一键还原重导；运行日志与崩溃堆栈持久化于 `%APPDATA%\bms2dtx\crash.log`（可在设置弹窗一键打开日志目录）。
   - 支持 **简体中文 / English / 日本語** 界面实时热切换，设置持久化保存于 `%APPDATA%\bms2dtx\settings.json`。
@@ -28,8 +28,8 @@
 
 ## 内置音频引擎与可选 FFmpeg
 
-自 **v0.4.0** 起，`bms2dtx` 内置 **`soundfile` (`libsndfile`) + `soxr` + `sounddevice` (Windows WASAPI Shared)**：
-- 常规 `.wav` / `.ogg` / `.flac` / `.mp3` 谱面的单音试听（WASAPI Shared 不独占声卡）、`bgm.ogg` 混合采样率离线混音、`.wav → .ogg` 转码及 `Swap L/R` **完全无需配置 FFmpeg，开箱即用**。
+自 **v0.4.0+** 起，`bms2dtx` 内置 **`soundfile` (`libsndfile`) + `soxr` + `sounddevice` (Windows WASAPI Shared → DirectSound → MME，禁用 WDM-KS)**：
+- 常规 `.wav` / `.ogg` / `.flac` / `.mp3` 谱面的单音试听（自动单声道扩双声道并按设备默认采样率预重采样，WASAPI Shared 不独占声卡）、`bgm.ogg` 混合采样率离线混音、`.wav → .ogg` 转码及 `Swap L/R` **完全无需配置 FFmpeg，开箱即用**。
 - 仅在遇到 `.m4a` / `.wma` 等冷门格式，或启用「适配老版 DTX 尺寸（等比缩放 + 补黑边）」图片模式时才需要可选 `ffmpeg.exe`（按可执行文件同级/`bin/` → `PATH` → `⚙ 設定 / Config` 弹窗手动指定 3 级查找）：
 
 ```powershell

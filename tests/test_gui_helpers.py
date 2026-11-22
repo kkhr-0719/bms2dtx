@@ -655,7 +655,8 @@ class I18nTests(unittest.TestCase):
             self.assertEqual(loaded["language"], "en")
             self.assertEqual(loaded["ffmpeg_path"], r"C:\tools\ffmpeg.exe")
             self.assertEqual(loaded["default_bind_mode"], "manual")
-            self.assertTrue(loaded["swap_lr"])
+            self.assertFalse(loaded["swap_lr"])
+            self.assertNotIn("swap_lr", json.loads(cfg.read_text(encoding="utf-8")))
             self.assertEqual(loaded["wav_labels"]["BGM"], "BgMix")
             self.assertEqual(loaded["wav_labels"]["SD"], "Snare")
 
@@ -962,7 +963,7 @@ class AppIntegrationTests(ChartCase):
         from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
         from gui.i18n import TRANSLATIONS, get_language, tr
 
-        self.assertEqual(APP_VERSION, "0.4.1")
+        self.assertEqual(APP_VERSION, "0.4.2")
 
         # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
         base_keys = set(TRANSLATIONS["zh_CN"].keys())
@@ -991,7 +992,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(loc_present[1], "__bms2dtx.json")
 
         # 3) Verify GUI title bar, TabId.LP dual-row widgets, Spinbox enable/disable, 1000ms tooltip, Undo/Redo.
-        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.1"))
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.2"))
         self.app.select_tab(TabId.LP)
         self.root.update()
 
@@ -1065,27 +1066,44 @@ class AppIntegrationTests(ChartCase):
         class _FakeSoundDevice:
             WasapiSettings = _FakeWasapiSettings
 
-            def __init__(self, *, fail_no_device: bool = False, strict_48k_stereo: bool = False) -> None:
+            def __init__(
+                self,
+                *,
+                fail_no_device: bool = False,
+                strict_48k_stereo: bool = False,
+                fail_devices: set[int] | None = None,
+            ) -> None:
                 self.fail_no_device = fail_no_device
                 self.strict_48k_stereo = strict_48k_stereo
+                self.fail_devices = set(fail_devices or ())
+                self.attempted_devices: list[int] = []
                 self.played: list[tuple[np.ndarray, dict]] = []
                 self.stopped = 0
+                self._hosts = [
+                    {"name": "MME", "default_output_device": 0},
+                    {"name": "Windows DirectSound", "default_output_device": 1},
+                    {"name": "Windows WASAPI", "default_output_device": 2},
+                    {"name": "Windows WDM-KS", "default_output_device": 3},
+                ]
+                self._devs = [
+                    {"name": "MME Out", "hostapi": 0, "max_output_channels": 2, "default_samplerate": 44100.0},
+                    {"name": "DS Out", "hostapi": 1, "max_output_channels": 2, "default_samplerate": 44100.0},
+                    {"name": "WASAPI Out", "hostapi": 2, "max_output_channels": 2, "default_samplerate": 48000.0},
+                    {"name": "WDM-KS Out", "hostapi": 3, "max_output_channels": 2, "default_samplerate": 48000.0},
+                ]
 
             def query_hostapis(self):
                 if self.fail_no_device:
-                    return [{"name": "MME", "default_output_device": -1}]
-                return [
-                    {"name": "MME", "default_output_device": 0},
-                    {"name": "Windows WASAPI", "default_output_device": 2},
-                ]
+                    return [{"name": "Windows WDM-KS", "default_output_device": 0}]
+                return self._hosts
 
             def query_devices(self, idx=None):
                 if self.fail_no_device:
-                    return [] if idx is None else {"max_output_channels": 0}
-                dev = {"max_output_channels": 2, "default_samplerate": 48000.0}
+                    dev = {"name": "WDM-KS Only", "hostapi": 0, "max_output_channels": 2, "default_samplerate": 48000.0}
+                    return [dev] if idx is None else dev
                 if idx is None:
-                    return [dev] * 3
-                return dev
+                    return self._devs
+                return self._devs[idx]
 
             @property
             def default(self):
@@ -1097,6 +1115,12 @@ class AppIntegrationTests(ChartCase):
                 self.stopped += 1
 
             def play(self, arr, **kwargs) -> None:
+                dev_idx = kwargs.get("device")
+                self.attempted_devices.append(dev_idx)
+                if dev_idx == 3:
+                    raise AssertionError("Windows WDM-KS must NEVER be attempted!")
+                if dev_idx in self.fail_devices:
+                    raise RuntimeError(f"Simulated PortAudioError on dev {dev_idx}")
                 if self.strict_48k_stereo:
                     if kwargs.get("samplerate") != 48000 or arr.ndim != 2 or arr.shape[1] != 2:
                         raise RuntimeError("Invalid sample rate (-9997)")
@@ -1133,6 +1157,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(len(fake_sd.played), 1)
         arr, kwargs = fake_sd.played[0]
         self.assertEqual(kwargs["device"], 2)  # Explicit Windows WASAPI device
+        self.assertEqual(kwargs["samplerate"], 48000)  # Resampled to WASAPI default_samplerate before play
         self.assertIsInstance(kwargs["extra_settings"], _FakeWasapiSettings)
         self.assertFalse(kwargs["extra_settings"].exclusive)  # Shared mode forced!
         self.assertTrue(kwargs["extra_settings"].auto_convert)  # auto_convert=True enabled!
@@ -1140,7 +1165,7 @@ class AppIntegrationTests(ChartCase):
         self.assertLess(float(np.max(np.abs(arr[:, 0]))), 1e-4)
         self.assertGreater(float(np.max(np.abs(arr[:, 1]))), 0.1)
 
-        # Fallback resampling via soxr when device strictly requires 48000 Hz stereo and slice is 22050 Hz mono
+        # Pre-normalization: 22050 Hz mono slice succeeds on first attempt (converted to 48000 Hz stereo before play)
         mono_22k = self.tmp / "mono_22k.wav"
         with wave.open(str(mono_22k), "wb") as wf:
             wf.setnchannels(1)
@@ -1161,12 +1186,54 @@ class AppIntegrationTests(ChartCase):
         self.addCleanup(player_strict.shutdown)
         self.assertTrue(player_strict.play(mono_22k))
         player_strict._last_thread.join(5)
+        self.assertEqual(strict_sd.attempted_devices, [2])  # First attempt already normalized & succeeded
         self.assertEqual(len(strict_sd.played), 1)
         arr_adapted, kw_adapted = strict_sd.played[0]
         self.assertEqual(kw_adapted["samplerate"], 48000)
         self.assertEqual(arr_adapted.shape[1], 2)
 
-        # Safe degradation when no audio output device exists (never crashes)
+        # Fallback: WASAPI fails -> skips WDM-KS (3) completely -> lands on DirectSound (1)
+        ds_sd = _FakeSoundDevice(fail_devices={2})
+        player_ds = PreviewPlayer(lambda: None, winsound_module=None, sounddevice_module=ds_sd)
+        self.addCleanup(player_ds.shutdown)
+        self.assertTrue(player_ds.play(mono_22k))
+        player_ds._last_thread.join(5)
+        self.assertEqual(ds_sd.attempted_devices, [2, 1])
+        self.assertNotIn(3, ds_sd.attempted_devices)
+        self.assertEqual(len(ds_sd.played), 1)
+        self.assertEqual(ds_sd.played[0][1]["device"], 1)
+        self.assertNotIn("extra_settings", ds_sd.played[0][1])
+
+        # Fallback: WASAPI (2) and DirectSound (1) both fail -> falls back to MME (0), never WDM-KS (3)
+        mme_sd = _FakeSoundDevice(fail_devices={2, 1})
+        player_mme = PreviewPlayer(lambda: None, winsound_module=None, sounddevice_module=mme_sd)
+        self.addCleanup(player_mme.shutdown)
+        self.assertTrue(player_mme.play(mono_22k))
+        player_mme._last_thread.join(5)
+        self.assertEqual(mme_sd.attempted_devices, [2, 1, 0])
+        self.assertNotIn(3, mme_sd.attempted_devices)
+        self.assertEqual(len(mme_sd.played), 1)
+        self.assertEqual(mme_sd.played[0][1]["device"], 0)
+
+        # If all allowed Host APIs fail, status lists attempted Host API names and never touches WDM-KS
+        all_fail_sd = _FakeSoundDevice(fail_devices={2, 1, 0})
+        all_fail_statuses: List[str] = []
+        player_all_fail = PreviewPlayer(
+            lambda: None,
+            on_status=all_fail_statuses.append,
+            winsound_module=None,
+            sounddevice_module=all_fail_sd,
+        )
+        self.addCleanup(player_all_fail.shutdown)
+        self.assertTrue(player_all_fail.play(stereo_wav))
+        player_all_fail._last_thread.join(5)
+        self.assertEqual(all_fail_sd.attempted_devices, [2, 1, 0])
+        joined = "\n".join(all_fail_statuses)
+        self.assertIn("Windows WASAPI", joined)
+        self.assertIn("Windows DirectSound", joined)
+        self.assertIn("MME", joined)
+
+        # Safe degradation when only blacklisted WDM-KS device exists (never crashes, never calls play)
         bad_sd = _FakeSoundDevice(fail_no_device=True)
         bad_statuses: List[str] = []
         player_bad = PreviewPlayer(
@@ -1236,7 +1303,7 @@ class AppIntegrationTests(ChartCase):
         except ValueError as exc:
             write_crash_entry(type(exc), exc, exc.__traceback__, context="unit_test", log_path=log_file)
         log_text = log_file.read_text(encoding="utf-8")
-        self.assertIn("bms2dtx 0.4.1", log_text)
+        self.assertIn("bms2dtx 0.4.2", log_text)
         self.assertIn("ValueError: synthetic crash test", log_text)
 
         alerted: list[tuple[Path, str]] = []
@@ -1326,7 +1393,12 @@ class AppIntegrationTests(ChartCase):
         self.assertIn("02", self.app.model.swapped_wav_ids)
         self.assertEqual(self.app.left_tree.item("02", "values")[4], "✓")
 
-        # Dropping .pms via tkdnd event handler loads cleanly
+        # Toggle global Swap L/R on before loading a new chart -> must reset to False & clear overrides!
+        self.app.swap_lr_var.set(True)
+        self.app._on_swap_lr_toggled()
+        self.assertTrue(self.app.swap_lr_var.get())
+
+        # Dropping .pms via tkdnd event handler loads cleanly and resets Swap L/R + L/R column to ✗
         pms_file = self.tmp / "chart_9k.pms"
         pms_file.write_text("#TITLE PMS Drop\n#BPM 130\n#WAV01 kick.wav\n#00111:01\n", encoding="utf-8")
 
@@ -1343,6 +1415,10 @@ class AppIntegrationTests(ChartCase):
                 threading.Event().wait(0.02)
             warn_mock.assert_not_called()
         self.assertEqual(self.app.chart.source_path, pms_file)
+        self.assertFalse(self.app.swap_lr_var.get())
+        self.assertFalse(self.app.model.swap_lr)
+        self.assertEqual(self.app.model.swapped_wav_ids, set())
+        self.assertEqual(self.app.left_tree.item("01", "values")[4], "✗")
 
 
 if __name__ == "__main__":

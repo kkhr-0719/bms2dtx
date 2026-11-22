@@ -725,8 +725,6 @@ def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any
                 bind_mode = str(data.get("default_bind_mode", "auto")).strip().lower()
                 if bind_mode in ("auto", "manual"):
                     settings["default_bind_mode"] = bind_mode
-                if "swap_lr" in data:
-                    settings["swap_lr"] = bool(data.get("swap_lr"))
                 raw_labels = data.get("wav_labels")
                 if isinstance(raw_labels, dict):
                     merged = dict(DEFAULT_WAV_LABELS)
@@ -769,9 +767,10 @@ def save_app_settings(
             elif k == "ffmpeg_path":
                 existing["ffmpeg_path"] = str(v).strip() if v else None
             elif k == "swap_lr":
-                existing["swap_lr"] = bool(v)
+                continue
             else:
                 existing[k] = v
+        existing.pop("swap_lr", None)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         return True

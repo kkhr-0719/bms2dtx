@@ -653,8 +653,8 @@ class App:
         self._apply_window_icon()
         self._setup_fonts_and_geometry()
 
-        self.swap_lr_var = tk.BooleanVar(value=bool(loaded_cfg.get("swap_lr", False)))
-        self.model.swap_lr = bool(self.swap_lr_var.get())
+        self.swap_lr_var = tk.BooleanVar(value=False)
+        self.model.swap_lr = False
         self.player = PreviewPlayer(
             lambda: self.ffmpeg_path,
             on_status=lambda msg: self._queue.put(("preview_status", msg)),
@@ -1181,8 +1181,6 @@ class App:
 
     def _on_swap_lr_toggled(self) -> None:
         self.model.swap_lr = bool(self.swap_lr_var.get())
-        if self._persist_settings:
-            save_app_settings({"swap_lr": self.model.swap_lr}, self.config_path)
         self._update_dirty_flag()
         self.refresh_left()
 
@@ -1442,7 +1440,6 @@ class App:
                         "ffmpeg_path": self.ffmpeg_explicit,
                         "default_bind_mode": self.model.default_bind_mode,
                         "wav_labels": new_labels,
-                        "swap_lr": bool(self.swap_lr_var.get()),
                     },
                     self.config_path,
                 )
@@ -1766,7 +1763,9 @@ class App:
         self.model.set_chart(chart)
         self.model.clear()
         self.model.set_separate_lbd(self.separate_lbd_var.get())
-        self.model.swap_lr = bool(self.swap_lr_var.get())
+        self.swap_lr_var.set(False)
+        self.model.swap_lr = False
+        self.model.swapped_wav_ids.clear()
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._clean_snapshot = self.model.snapshot()

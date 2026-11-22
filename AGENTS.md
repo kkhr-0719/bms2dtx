@@ -2,7 +2,7 @@
 
 ## 1. 项目目标与版本约定
 - 构建一个轻量级 Windows 桌面工具，将 BMS / BME / BML / PMS 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并支持通过 PyInstaller 打包为单文件无黑框可执行程序 `dist/bms2dtx.exe`（同时保留可运行的 Python CLI、源码与单元测试）。
-- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.4.1`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
+- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.4.2`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
 
 ---
 
@@ -28,7 +28,7 @@
    - 当 `separate_lbd=False`（默认隐藏 LBD Tab）时，若配置中仍残留 `LBD` 分配或绑定，导出时确定性地将其合并入 `BD`，绝不在 `1C` 轨生成幽灵音符。
 7. **内置音频引擎与 `ffmpeg` 可选化底线**：
    - 核心解码、混音、OGG Vorbis 编码、异采样率重采样与立体声 `Swap L/R` 均优先走进程内 **`soundfile` (`libsndfile`) + `soxr`（NumPy 线性兜底）**，常规 `.wav`/`.ogg`/`.flac`/`.mp3` 导出与试听在零 FFmpeg 环境下必须 100% 跑通。
-   - 试听端（`gui/preview_player.py`）使用 **`sounddevice` (PortAudio)** 在 Windows 上显式优先选择 **`Windows WASAPI` Shared 模式**（`WasapiSettings(exclusive=False, auto_convert=True)` 并附带 `soxr` 设备采样率/声道兜底重采样），无声卡/设备异常时安全降级、绝不崩溃；`swap_lr` 直接在内存 NumPy 数组翻转。
+   - 试听端（`gui/preview_player.py`）使用 **`sounddevice` (PortAudio)** 在 Windows 上**明确拉黑 `Windows WDM-KS`**，按 **`Windows WASAPI` Shared（`WasapiSettings(exclusive=False, auto_convert=True)`）→ `Windows DirectSound` → `MME`** 顺序回退选择默认输出设备，并在播放前强制将单声道扩至双声道、`soxr` 重采样至设备 `default_samplerate`；无声卡/设备异常时安全降级、绝不崩溃；`swap_lr` 直接在内存 NumPy 数组翻转且不持久化到全局 `settings.json`（打开新谱面时强制重置为未勾选）。
    - `find_ffmpeg` 仅作为冷门音频格式（如 `.m4a`/`.wma`）与老版图片缩放的可选外挂：在 `sys.frozen` 及开发环境下优先查找 `Path(sys.executable).resolve().parent` 及 `bin/` 子目录，再回退系统 `PATH` 与设置弹窗；Windows 下所有调用 `ffmpeg` / `ffprobe` 的 `subprocess` 必须传入 `CREATE_NO_WINDOW`。
 8. **`.bml` 长押与 `.pms` 9 键解析规范**：
    - 可见普通音符通道覆盖 `11`–`19` 与 `21`–`29`（支持 `.pms` 9 键），文件过滤与拖放支持 `*.bms;*.bme;*.bml;*.pms`。
