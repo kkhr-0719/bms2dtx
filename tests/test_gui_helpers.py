@@ -1074,10 +1074,20 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(TRANSLATIONS["ja"]["save_map_btn"], "JSONに別名保存...")
         self.assertEqual(self.app.save_map_btn.cget("text"), tr("save_map_btn", lang=get_language()))
 
-        # 2) Verify auto_lp_combobox_values and suggest_load_mapping_location.
+        # 2) Verify auto_lp_combobox_values (plain "自动" when LP empty, "[自动] [ID] filename" when populated)
+        #    and suggest_load_mapping_location.
         combo_vals = auto_lp_combobox_values(self.app.model, self.chart)
         self.assertGreaterEqual(len(combo_vals), 3)
         self.assertEqual([v for _, v in combo_vals[:3]], [AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_AUTO, AUTO_LP_CHIP_EMPTY_ZZ])
+        self.assertEqual(combo_vals[1][0], "自动")
+
+        self.app.model.assign(TabId.LP, ["03", "04"], chart=self.chart)
+        combo_vals_pop = auto_lp_combobox_values(self.app.model, self.chart)
+        self.assertEqual(combo_vals_pop[1][0], "[自动] [04] other.wav", combo_vals_pop[1])
+        self.app.model.set_bind(TabId.LP, "03")
+        combo_vals_bound = auto_lp_combobox_values(self.app.model, self.chart)
+        self.assertEqual(combo_vals_bound[1][0], "[自动] [03] hh_open.wav", combo_vals_bound[1])
+        self.app.model.clear()
 
         out_dir = self.bms.parent / "out_suggest"
         out_dir.mkdir(exist_ok=True)

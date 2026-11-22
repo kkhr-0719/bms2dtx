@@ -733,6 +733,27 @@ def format_tab_row(
     return text
 
 
+def _resolve_auto_chip_for_lp(
+    model: AssignmentModel, chart: Optional[BmsChart]
+) -> Optional[str]:
+    """Resolve the representative LP WAV ID that 'Auto' mode selects (if LP Tab is non-empty)."""
+    active_chart = chart if chart is not None else model.chart
+    lp_display_ids = model.display_ids_for_tab(TabId.LP, active_chart)
+    if not lp_display_ids:
+        return None
+    lp_orig, _is_auto = model.effective_bind(TabId.LP, active_chart)
+    if lp_orig is None:
+        lp_orig = model.auto_bind_for_tab(TabId.LP, active_chart)
+    if lp_orig is None:
+        return None
+    if active_chart is not None:
+        _rep_to_group, wid_to_rep = wav_physical_groups(active_chart)
+        rep = wid_to_rep.get(lp_orig, lp_orig)
+        if rep in lp_display_ids:
+            return rep
+    return lp_orig if lp_orig in lp_display_ids else lp_display_ids[0]
+
+
 def resolve_auto_lp_target_wav_id(
     model: AssignmentModel, chart: Optional[BmsChart]
 ) -> Optional[str]:
@@ -746,25 +767,18 @@ def resolve_auto_lp_target_wav_id(
     if not lp_display_ids:
         return None
 
-    chosen_orig: Optional[str] = None
     if mode_lower == AUTO_LP_CHIP_AUTO:
-        lp_orig, _is_auto = model.effective_bind(TabId.LP, active_chart)
-        if lp_orig is None:
-            lp_orig = model.auto_bind_for_tab(TabId.LP, active_chart)
-        chosen_orig = lp_orig
-    else:
-        cand = normalize_wav_id(active_chart, raw_mode)
-        if cand in model.tab_wavs[TabId.LP]:
-            chosen_orig = cand
+        return _resolve_auto_chip_for_lp(model, active_chart)
 
-    if chosen_orig is None:
+    cand = normalize_wav_id(active_chart, raw_mode)
+    if cand not in model.tab_wavs[TabId.LP]:
         return None
     if active_chart is not None:
         _rep_to_group, wid_to_rep = wav_physical_groups(active_chart)
-        rep = wid_to_rep.get(chosen_orig, chosen_orig)
+        rep = wid_to_rep.get(cand, cand)
         if rep in lp_display_ids:
             return rep
-    return chosen_orig if chosen_orig in lp_display_ids else lp_display_ids[0]
+    return cand if cand in lp_display_ids else lp_display_ids[0]
 
 
 def auto_lp_combobox_values(
@@ -772,9 +786,18 @@ def auto_lp_combobox_values(
 ) -> List[Tuple[str, str]]:
     """``[(display_text, chip_mode_value)]`` for LP Tab's Auto-LP selector."""
     active_chart = chart if chart is not None else model.chart
+    auto_wid = _resolve_auto_chip_for_lp(model, active_chart)
+    if auto_wid is not None:
+        auto_entry = active_chart.wavs.get(auto_wid) if active_chart is not None else None
+        auto_label = (
+            f"{tr('auto_lp_chip_auto_prefix')}"
+            f"{format_tab_row(auto_entry, auto_wid, chart=active_chart)}"
+        )
+    else:
+        auto_label = tr("auto_lp_chip_auto")
     values: List[Tuple[str, str]] = [
         (tr("auto_lp_chip_none"), AUTO_LP_CHIP_NONE),
-        (tr("auto_lp_chip_auto"), AUTO_LP_CHIP_AUTO),
+        (auto_label, AUTO_LP_CHIP_AUTO),
         (tr("auto_lp_chip_empty_zz"), AUTO_LP_CHIP_EMPTY_ZZ),
     ]
     for wid in model.display_ids_for_tab(TabId.LP, active_chart):
