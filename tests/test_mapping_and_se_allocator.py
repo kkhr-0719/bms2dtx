@@ -786,17 +786,46 @@ class TestSeAllocatorSlicerCollapseAndOverflow(unittest.TestCase):
                         threshold_mode="note_value",
                         note_num=1,
                         note_den=4,
+                        use_zy=True,
                     ),
                 ),
             )
             self.assertEqual(plan.auto_lp_placed_count, 2)
             self.assertEqual(plan.auto_lp_orig_wav_id, "03")
+            self.assertTrue(plan.auto_lp_use_zy)
             self.assertEqual(plan.wav_volumes.get("ZY"), 70)
             zy_notes = [n for n in plan.tab_placed_notes if n.dtx_wav_id == "ZY"]
             self.assertEqual(len(zy_notes), 2)
             self.assertEqual(
                 [(n.measure, n.channel, n.pos.numerator, n.pos.denominator) for n in zy_notes],
                 [(1, "1B", 1, 8), (4, "1B", 1, 2)],
+            )
+
+            # Default use_zy=False directly reuses target LP slice's own DTX WAV ID without ZY
+            plan_reuse = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={
+                        TabId.HH_CLOSE: ["01"],
+                        TabId.HH_OPEN: ["02"],
+                        TabId.LP: ["03"],
+                    },
+                    auto_lp=AutoLpConfig(
+                        chip_mode=AUTO_LP_CHIP_AUTO,
+                        threshold_mode="note_value",
+                        note_num=1,
+                        note_den=4,
+                    ),
+                ),
+            )
+            lp_dtx_id = plan_reuse.wav_id_map["03"]
+            self.assertEqual(plan_reuse.auto_lp_placed_count, 2)
+            self.assertFalse(plan_reuse.auto_lp_use_zy)
+            self.assertNotIn("ZY", plan_reuse.wav_volumes)
+            reused_1b = [n for n in plan_reuse.tab_placed_notes if n.channel == "1B" and n.measure in (1, 4)]
+            self.assertEqual(
+                [(n.measure, n.dtx_wav_id, n.pos.numerator, n.pos.denominator) for n in reused_1b],
+                [(1, lp_dtx_id, 1, 8), (4, lp_dtx_id, 1, 2)],
             )
 
     def test_auto_lp_note_value_with_time_signature_and_ms_with_bpm_changes(self) -> None:

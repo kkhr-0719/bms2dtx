@@ -803,7 +803,8 @@ class AppIntegrationTests(ChartCase):
             ("id", "filename", "count", "target", "lr"),
         )
         for tab, panel in self.app.panels.items():
-            self.assertEqual(str(panel.listbox.cget("selectmode")), "extended")
+            self.assertEqual(str(panel.tree.cget("selectmode")), "extended")
+            self.assertEqual(tuple(panel.tree.cget("columns")), ("id", "filename", "lr"))
             self.assertEqual(panel.combo is not None, tab_has_bind_combobox(tab))
         self.assertFalse(hasattr(self.app, "toggle_var"))
         # Progressbar at rest is determinate with value 0 (never stuck in indeterminate green block)
@@ -840,7 +841,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(app.model.get_bind(TabId.SD), "01")
         # remove bound wav "01" -> falls back to remaining slice's auto-bind or explicit None
         app.select_tab(TabId.SD)
-        app.panels[TabId.SD].listbox.selection_set(0)
+        app.panels[TabId.SD].tree.selection_set(("01",))
         app.on_remove()
         self.assertEqual(app.model.tab_wavs[TabId.SD], ["02"])
         self.assertIsNone(app.model.get_bind(TabId.SD))
@@ -851,7 +852,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(combo.get(), NO_BIND_LABEL)
         self.assertNotIn("assigned", app.left_tree.item("01", "tags"))
         # Remove remaining "02" -> empty tab shows NO_BIND_LABEL
-        app.panels[TabId.SD].listbox.selection_set(0)
+        app.panels[TabId.SD].tree.selection_set(("02",))
         app.on_remove()
         self.assertEqual(combo.get(), NO_BIND_LABEL)
 
@@ -883,7 +884,8 @@ class AppIntegrationTests(ChartCase):
             app.select_tab(TabId.BD)
             app.model.assign(TabId.BD, ["04"], chart=self.chart)
             app.refresh_all()
-            app.panels[TabId.BD].listbox.selection_set(0)
+            app.panels[TabId.BD].tree.selection_set(("04",))
+            self.root.update()
             app.preview_from_tab(TabId.BD)
             play_mock.assert_called_once_with(self.chart.wavs["04"].resolved_path)
             play_mock.reset_mock()
@@ -1061,7 +1063,7 @@ class AppIntegrationTests(ChartCase):
         from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
         from gui.i18n import TRANSLATIONS, get_language, tr
 
-        self.assertEqual(APP_VERSION, "0.4.3")
+        self.assertEqual(APP_VERSION, "0.5.0")
 
         # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
         base_keys = set(TRANSLATIONS["zh_CN"].keys())
@@ -1089,17 +1091,28 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(Path(loc_present[0]), out_dir)
         self.assertEqual(loc_present[1], "__bms2dtx.json")
 
-        # 3) Verify GUI title bar, TabId.LP dual-row widgets, Spinbox enable/disable, 1000ms tooltip, Undo/Redo.
-        self.assertTrue(self.root.title().startswith("bms2dtx 0.4.3"))
+        # 3) Verify GUI title bar, TabId.LP header + bottom bar controls, Use ZY / Volume linkage, 1000ms tooltip, Undo/Redo.
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.5.0"))
+        self.app.model.assign(TabId.LP, ["03"], chart=self.chart)
+        self.app._clean_snapshot = self.app.model.snapshot()
+        self.app.dirty = False
+        self.app.refresh_all()
         self.app.select_tab(TabId.LP)
         self.root.update()
 
         lp_panel = self.app.panels[TabId.LP]
         self.assertIsNotNone(lp_panel.auto_lp_combo)
+        self.assertIsNotNone(lp_panel.auto_lp_use_zy_chk)
+        self.assertIsNotNone(lp_panel.auto_lp_play_btn)
+        self.assertIsNotNone(lp_panel.auto_lp_target_label)
         self.assertIsNotNone(lp_panel.auto_lp_vol_spin)
         self.assertIsNotNone(lp_panel.auto_lp_mode_note_rb)
         self.assertIsNotNone(lp_panel.auto_lp_mode_ms_rb)
+        self.assertEqual(lp_panel.auto_lp_vol_var.get(), "100")
+        self.assertFalse(lp_panel.auto_lp_use_zy_var.get())
+        self.assertEqual(str(lp_panel.auto_lp_use_zy_chk.cget("state")), "disabled")
         self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
+        self.assertEqual(str(lp_panel.auto_lp_play_btn.cget("state")), "disabled")
         self.assertIsNotNone(lp_panel._lp_tip_combo)
         self.assertEqual(lp_panel._lp_tip_combo._delay_ms, 1000)
 
@@ -1116,27 +1129,40 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(len(radios), 2)
         self.assertGreaterEqual(len(spins), 1)
 
-        # Switch Auto-LP to "auto" -> Spinbox enabled, dirty=True, undoable.
+        # Switch Auto-LP to "auto" (use_zy still False) -> Play & Use ZY enabled, Spinbox stays disabled.
         auto_idx = lp_panel.auto_lp_chip_values.index(AUTO_LP_CHIP_AUTO)
         lp_panel.auto_lp_combo.current(auto_idx)
         lp_panel._on_auto_lp_changed()
         self.root.update()
-        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "normal")
+        self.assertEqual(str(lp_panel.auto_lp_use_zy_chk.cget("state")), "normal")
+        self.assertEqual(str(lp_panel.auto_lp_play_btn.cget("state")), "normal")
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
         self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_AUTO)
+        self.assertIn("03", lp_panel.auto_lp_target_var.get())
         self.assertTrue(self.app.dirty)
 
-        # Switch Auto-LP to "empty_zz" -> Spinbox disabled again.
+        # Check Use ZY -> Spinbox enabled.
+        lp_panel.auto_lp_use_zy_var.set(True)
+        lp_panel._on_auto_lp_changed()
+        self.root.update()
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "normal")
+        self.assertTrue(self.app.model.auto_lp.use_zy)
+
+        # Switch Auto-LP to "empty_zz" -> Use ZY, Play & Spinbox all disabled.
         zz_idx = lp_panel.auto_lp_chip_values.index(AUTO_LP_CHIP_EMPTY_ZZ)
         lp_panel.auto_lp_combo.current(zz_idx)
         lp_panel._on_auto_lp_changed()
         self.root.update()
+        self.assertEqual(str(lp_panel.auto_lp_use_zy_chk.cget("state")), "disabled")
         self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
+        self.assertEqual(str(lp_panel.auto_lp_play_btn.cget("state")), "disabled")
         self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_EMPTY_ZZ)
 
-        # Undo should revert empty_zz -> auto; Undo again reverts auto -> none; Redo restores auto.
+        # Undo should revert empty_zz -> auto (use_zy=True, vol enabled); Redo -> empty_zz.
         self.assertTrue(self.app.on_undo())
         self.root.update()
         self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_AUTO)
+        self.assertTrue(self.app.model.auto_lp.use_zy)
         self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "normal")
 
         self.assertTrue(self.app.on_redo())
@@ -1144,8 +1170,9 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_EMPTY_ZZ)
         self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
 
-        self.assertTrue(self.app.on_undo())
-        self.assertTrue(self.app.on_undo())
+        self.assertTrue(self.app.on_undo())  # back to auto + use_zy=True
+        self.assertTrue(self.app.on_undo())  # back to auto + use_zy=False
+        self.assertTrue(self.app.on_undo())  # back to none
         self.root.update()
         self.assertEqual(self.app.model.auto_lp.chip_mode, AUTO_LP_CHIP_NONE)
         self.assertFalse(self.app.dirty)
@@ -1401,7 +1428,7 @@ class AppIntegrationTests(ChartCase):
         except ValueError as exc:
             write_crash_entry(type(exc), exc, exc.__traceback__, context="unit_test", log_path=log_file)
         log_text = log_file.read_text(encoding="utf-8")
-        self.assertIn("bms2dtx 0.4.3", log_text)
+        self.assertIn("bms2dtx 0.5.0", log_text)
         self.assertIn("ValueError: synthetic crash test", log_text)
 
         alerted: list[tuple[Path, str]] = []
@@ -1468,16 +1495,18 @@ class AppIntegrationTests(ChartCase):
         self.app._on_swap_lr_toggled()
         self.assertEqual(self.app.left_tree.item("01", "values")[4], "✓")
 
-        # Assign "02" to SD tab, select it in the right tab listbox, and toggle via ⇄ L/R
+        # Assign "02" to SD tab, select it in the right tab Treeview, and toggle via ⇄ L/R
         self.app.left_tree.selection_set(("02",))
         self.app.select_tab(TabId.SD)
         self.app.on_add()
         sd_panel = self.app.panels[TabId.SD]
-        sd_panel.listbox.selection_set(0)
+        sd_panel.tree.selection_set(("02",))
+        self.root.update()
         self.app._set_focus_side("right")
         self.app.on_toggle_slice_lr()
         self.assertIn("02", self.app.model.swapped_wav_ids)
         self.assertEqual(self.app.left_tree.item("02", "values")[4], "✓")
+        self.assertEqual(sd_panel.tree.item("02", "values")[2], "✓")
 
         # JSON round-trip preserves swapped_wav_ids
         json_dict = self.app.model.to_json_dict()
@@ -1557,11 +1586,14 @@ class AppIntegrationTests(ChartCase):
 
         self.app.select_tab(TabId.SD)
         sd_panel = self.app.panels[TabId.SD]
-        sd_panel.listbox.selection_set(0)
+        sd_panel.tree.selection_set(("02",))
+        self.root.update()
         self.assertTrue(sd_panel.selected_ids())
-        bbox = sd_panel.listbox.bbox(len(sd_panel.ids) - 1)
-        below_y = (bbox[1] + bbox[3] + 20) if bbox else 999
-        res_right = sd_panel._on_right_click(SimpleNamespace(x=10, y=below_y))
+        with (
+            mock.patch.object(sd_panel.tree, "identify_region", return_value="nothing"),
+            mock.patch.object(sd_panel.tree, "identify_row", return_value=""),
+        ):
+            res_right = sd_panel._on_right_click(SimpleNamespace(x=10, y=999))
         self.assertEqual(res_right, "break")
         self.assertEqual(sd_panel.selected_ids(), [])
 
@@ -1627,6 +1659,197 @@ class AppIntegrationTests(ChartCase):
         self.assertIn("02", self.app.model.tab_wavs[TabId.SD])
         self.assertTrue(self.app.on_redo())
         self.assertNotIn("02", self.app.model.tab_wavs[TabId.SD])
+
+    def test_v050_mutual_exclusion_right_treeview_auto_lp_bottom_bar_and_arrow_shortcuts(self) -> None:
+        import math
+        import tkinter as tk
+        import numpy as np
+        import soundfile as sf
+        from core.constants import AUTO_LP_CHIP_AUTO, AUTO_LP_CHIP_EMPTY_ZZ, AUTO_LP_CHIP_NONE
+        from gui.i18n import TRANSLATIONS, get_language, set_language, tr
+        from gui.preview_player import PreviewPlayer
+
+        app = self.app
+        orig_lang = get_language()
+        self.addCleanup(lambda: set_language(orig_lang))
+
+        # 1) Global Swap L/R checkbox text across all 3 languages
+        expected_swap_labels = {
+            "zh_CN": "所有切片左右声道互换",
+            "en": "Swap L/R for All Slices",
+            "ja": "全スライスのL/Rを反転",
+        }
+        for lang, expected_txt in expected_swap_labels.items():
+            set_language(lang)
+            app.apply_language()
+            self.assertEqual(TRANSLATIONS[lang]["swap_lr_chk"], expected_txt)
+            self.assertEqual(str(app.swap_lr_chk.cget("text")), expected_txt)
+        set_language("zh_CN")
+        app.apply_language()
+
+        # 2) Strict mutual exclusion + Left->TabSwitch->Add preservation
+        app.model.assign(TabId.SD, ["02"], chart=self.chart)
+        app.refresh_all()
+        app.select_tab(TabId.SD)
+        app.left_tree.selection_set(("01",))
+        self.root.update()
+        self.assertEqual(app.selected_left_ids(), ["01"])
+        self.assertEqual(app.panels[TabId.SD].selected_ids(), [])
+
+        # Selecting right clears left!
+        app.panels[TabId.SD].tree.selection_set(("02",))
+        self.root.update()
+        self.assertEqual(app.panels[TabId.SD].selected_ids(), ["02"])
+        self.assertEqual(app.selected_left_ids(), [])
+
+        # Selecting left clears right!
+        app.left_tree.selection_set(("01",))
+        self.root.update()
+        self.assertEqual(app.selected_left_ids(), ["01"])
+        self.assertEqual(app.panels[TabId.SD].selected_ids(), [])
+
+        # Switching tabs preserves left selection and keeps new right panel unselected!
+        app.select_tab(TabId.BD)
+        self.root.update()
+        self.assertEqual(app.selected_left_ids(), ["01"])
+        self.assertEqual(app.panels[TabId.BD].selected_ids(), [])
+        app.select_tab(TabId.SD)
+        self.root.update()
+        self.assertEqual(app.selected_left_ids(), ["01"])
+        self.assertEqual(app.panels[TabId.SD].selected_ids(), [])
+
+        # Right Treeview L/R column syncs with per-slice toggle, global Swap L/R, Undo & Redo
+        sd_panel = app.panels[TabId.SD]
+        self.assertEqual(sd_panel.tree.item("02", "values")[2], "✗")
+        app.left_tree.selection_remove("01")
+        sd_panel.tree.selection_set(("02",))
+        self.root.update()
+        app.on_toggle_slice_lr()
+        self.assertEqual(sd_panel.tree.item("02", "values")[2], "✓")
+        self.assertEqual(app.left_tree.item("02", "values")[4], "✓")
+
+        app.swap_lr_var.set(True)
+        app._on_swap_lr_toggled()
+        self.assertEqual(sd_panel.tree.item("02", "values")[2], "✗")  # True ^ True == False
+        app.swap_lr_var.set(False)
+        app._on_swap_lr_toggled()
+        self.assertEqual(sd_panel.tree.item("02", "values")[2], "✓")
+
+        self.assertTrue(app.on_undo())
+        self.assertEqual(sd_panel.tree.item("02", "values")[2], "✗")
+        self.assertTrue(app.on_redo())
+        self.assertEqual(sd_panel.tree.item("02", "values")[2], "✓")
+
+        # 3) Arrow shortcuts (<Right> adds, <Left> removes) + text input focus guard
+        app.select_tab(TabId.BD)
+        app.left_tree.selection_set(("01",))
+        self.root.update()
+        with mock.patch.object(self.root, "focus_get", return_value=app.left_tree):
+            self.assertEqual(app._on_key_right(), "break")
+        self.assertIn("01", app.model.tab_wavs[TabId.BD])
+
+        app.panels[TabId.BD].tree.selection_set(("01",))
+        self.root.update()
+        with mock.patch.object(self.root, "focus_get", return_value=app.panels[TabId.BD].tree):
+            self.assertEqual(app._on_key_left(), "break")
+        self.assertNotIn("01", app.model.tab_wavs[TabId.BD])
+
+        # Guard: when focused inside any text/numeric input (Entry, TEntry, Spinbox, Combobox, Text)
+        # or child Toplevel modal, arrow shortcuts MUST return None without triggering add/remove!
+        app.left_tree.selection_set(("01",))
+        self.root.update()
+        lp_panel = app.panels[TabId.LP]
+        dummy_text = tk.Text(self.root)
+        dummy_modal = tk.Toplevel(self.root)
+        dummy_modal_btn = tk.Button(dummy_modal)
+        for focused_widget in (
+            lp_panel.auto_lp_num_entry,
+            lp_panel.auto_lp_vol_spin,
+            lp_panel.auto_lp_combo,
+            dummy_text,
+            dummy_modal_btn,
+        ):
+            with mock.patch.object(self.root, "focus_get", return_value=focused_widget):
+                self.assertIsNone(app._on_key_right())
+                self.assertIsNone(app._on_key_left())
+        dummy_modal.destroy()
+        dummy_text.destroy()
+        self.assertNotIn("01", app.model.tab_wavs[TabId.BD])
+
+        # 4) Auto-LP bottom bar preview gain & effective_swap scaling
+        app.select_tab(TabId.LP)
+        app.model.assign(TabId.LP, ["03"], chart=self.chart)
+        app.refresh_all()
+        lp_panel.auto_lp_combo.current(lp_panel.auto_lp_chip_values.index(AUTO_LP_CHIP_AUTO))
+        lp_panel._on_auto_lp_changed()
+        self.root.update()
+
+        # Default use_zy=False -> preview plays with gain=1.0 and effective_swap of "03"
+        with mock.patch.object(app.player, "play", return_value=True) as play_mock:
+            lp_panel._on_auto_lp_preview()
+            play_mock.assert_called_once_with(
+                self.chart.wavs["03"].resolved_path,
+                swap_lr=False,
+                gain=1.0,
+            )
+
+        # Check Use ZY, set volume=35, toggle L/R on "03" -> preview passes swap_lr=True, gain=0.35!
+        lp_panel.auto_lp_use_zy_var.set(True)
+        lp_panel.auto_lp_vol_var.set("35")
+        lp_panel._on_auto_lp_changed()
+        app.model.toggle_slice_swap_lr(["03"], chart=self.chart)
+        app.refresh_all()
+        with mock.patch.object(app.player, "play", return_value=True) as play_mock:
+            lp_panel._on_auto_lp_preview()
+            play_mock.assert_called_once()
+            self.assertEqual(play_mock.call_args.kwargs["swap_lr"], True)
+            self.assertAlmostEqual(play_mock.call_args.kwargs["gain"], 0.35, places=4)
+
+        # Empty LP or None -> Use ZY / Volume / Play all disabled cleanly
+        lp_panel.auto_lp_combo.current(lp_panel.auto_lp_chip_values.index(AUTO_LP_CHIP_NONE))
+        lp_panel._on_auto_lp_changed()
+        self.assertEqual(str(lp_panel.auto_lp_use_zy_chk.cget("state")), "disabled")
+        self.assertEqual(str(lp_panel.auto_lp_vol_spin.cget("state")), "disabled")
+        self.assertEqual(str(lp_panel.auto_lp_play_btn.cget("state")), "disabled")
+        self.assertEqual(lp_panel.auto_lp_target_var.get(), tr("auto_lp_target_none"))
+
+        lp_panel.auto_lp_combo.current(lp_panel.auto_lp_chip_values.index(AUTO_LP_CHIP_EMPTY_ZZ))
+        lp_panel._on_auto_lp_changed()
+        self.assertEqual(str(lp_panel.auto_lp_play_btn.cget("state")), "disabled")
+        self.assertEqual(lp_panel.auto_lp_target_var.get(), tr("auto_lp_target_zz"))
+
+        # Direct PreviewPlayer gain scaling verification on stereo float32 PCM
+        played_arrays: list[np.ndarray] = []
+
+        class _FakeSD:
+            def query_hostapis(self):
+                return [{"name": "Windows WASAPI", "default_output_device": 0}]
+
+            def query_devices(self, idx=None):
+                dev = {"name": "Out", "hostapi": 0, "max_output_channels": 2, "default_samplerate": 44100.0}
+                return [dev] if idx is None else dev
+
+            def stop(self):
+                pass
+
+            def play(self, data, **kwargs):
+                played_arrays.append(np.array(data, copy=True))
+
+        t = np.linspace(0.0, 0.05, 2205, endpoint=False, dtype=np.float32)
+        st = np.column_stack([0.8 * np.sin(2.0 * math.pi * 440.0 * t), np.zeros_like(t)])
+        test_wav = self.tmp / "lp_gain_test.wav"
+        sf.write(str(test_wav), st, 44100, subtype="FLOAT")
+
+        player = PreviewPlayer(lambda: None, sounddevice_module=_FakeSD(), soundfile_module=sf, numpy_module=np)
+        self.addCleanup(player.shutdown)
+        self.assertTrue(player.play(test_wav, swap_lr=True, gain=0.25))
+        if player._last_thread is not None:
+            player._last_thread.join(timeout=2.0)
+        self.assertEqual(len(played_arrays), 1)
+        out_arr = played_arrays[0]
+        # Left channel had 0.8, Right had 0.0 -> after swap_lr=True and gain=0.25: L~0, R peak ~0.2
+        self.assertLess(float(np.max(np.abs(out_arr[:, 0]))), 1e-4)
+        self.assertAlmostEqual(float(np.max(np.abs(out_arr[:, 1]))), 0.2, delta=0.02)
 
 
 if __name__ == "__main__":

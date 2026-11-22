@@ -2,7 +2,7 @@
 
 ## 1. 项目目标与版本约定
 - 构建一个轻量级 Windows 桌面工具，将 BMS / BME / BML / PMS 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并支持通过 PyInstaller 打包为单文件无黑框可执行程序 `dist/bms2dtx.exe`（同时保留可运行的 Python CLI、源码与单元测试）。
-- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.4.3`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
+- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.5.0`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
 
 ---
 
@@ -47,9 +47,12 @@
 - **DTXC 绑定芯片**：
   - `#DTXC_LANEBINDEDCHIP: <lane> <main_wav> <sub_wav>`（`01`=LC、`02`=HHC/HHO、`03`=LP/LBD、`04`=SD、`05`=HT、`06`=BD、`07`=LT、`08`=FT、`09`=CY/RD）。`separate_lbd=False` 且 `LBD` 未独立绑定时，`BD` 默认芯片自动同步填入 `03` 轨副槽。
 - **`Auto-LP`（OHH `18` → CHH `11` 自动补足 LP `1B` 状态机）**：
-  - 配置字段：`chip_mode`（`none` / `auto` / `empty_zz` / 指定 LP 切片）、`volume`（`0..100`，默认 `50`）、`threshold_mode`（`note_value` 默认 / `ms`）、`note_num`/`note_den`（默认 `1/4`，分母可选 `2, 4, 6, 8, 12, 16`）、`threshold_ms`（默认 `250`）。
+  - 配置字段：`chip_mode`（`none` / `auto` / `empty_zz` / 指定 LP 切片）、`use_zy`（布尔开关，默认 `False`）、`volume`（`0..100`，默认 `100`）、`threshold_mode`（`note_value` 默认 / `ms`）、`note_num`/`note_den`（默认 `1/4`，分母可选 `2, 4, 6, 8, 12, 16`）、`threshold_ms`（默认 `250`）。
   - 选音回退链（`chip_mode == "auto"`）：优先取 `LP` Tab 默认绑定芯片；若为“无”则回退 `LP` Tab 谱面使用次数最多切片；若 `LP` Tab 为空则安全退化为不插入。
-  - 槽位与音量输出：选真实 LP 音频时写入 `#WAVZY: <路径>\t;<LP Label>` + `#VOLUMEZY: <0~100>`，以 `ZY` 写入 `1B`；选 `empty_zz` 时生成 `_silent_zz.wav`（10ms 16-bit mono PCM 静音），写入 `#WAVZZ: _silent_zz.wav\t;LP_GHOST` + `#VOLUMEZZ: 0`，以 `ZZ` 写入 `1B`。
+  - 槽位与音量输出：
+    - `use_zy=False`（默认）选真实 LP 音频时，**直接复用目标 LP 切片自身的 DTX WAV ID 写入 `1B`**，不输出冗余的 `#WAVZY:` / `#VOLUMEZY:`；
+    - `use_zy=True` 选真实 LP 音频时写入 `#WAVZY: <路径>\t;<LP Label>` + `#VOLUMEZY: <0~100>`，以 `ZY` 写入 `1B`；
+    - 选 `empty_zz` 时生成 `_silent_zz.wav`（10ms 16-bit mono PCM 静音），写入 `#WAVZZ: _silent_zz.wav\t;LP_GHOST` + `#VOLUMEZZ: 0`，以 `ZZ` 写入 `1B`。
   - 3 条物理防误插规则（阈值判定均含等号 `<=`）：
     1. 仅在 `OHH` 之后的**第一个** `CHH` 处触发，后续连续 `CHH` 不重复插入；
     2. 若 `OHH` 与该 `CHH` 之间或该 `CHH` 同一拍位**已存在原谱 LP 音符**，跳过不插入、绝不覆盖原谱；
@@ -58,9 +61,9 @@
 ---
 
 ## 4. 桌面 GUI 与导出能力要点
-- **主流程与界面**：支持点击与 `tkinterdnd2`（`tkdnd` 原生 OLE 拖放，支持 `.bms`/`.bme`/`.bml`/`.pms` 完整 Unicode 路径）拖入导入；左侧 5 列 `ttk.Treeview`（`ID` / `文件名` / `次数` / `目标轨` / `L/R`，扩展多选置灰 + 中间栏 `⇄ L/R` 单切片/批量声道翻转按钮 + 2 行底部控制栏 + 悬停 Tooltip + 左右列表联动 WASAPI Shared 单音试听 + 点击左右列表空白区取消选中 + 设置项可选开启左侧直接点「移除」）；`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` 撤销重做栈（输入控件聚焦时不抢占）与未导出 `dirty` 关闭拦截。
+- **主流程与界面**：支持点击与 `tkinterdnd2`（`tkdnd` 原生 OLE 拖放，支持 `.bms`/`.bme`/`.bml`/`.pms` 完整 Unicode 路径）拖入导入；左侧 5 列 `ttk.Treeview`（`ID` / `文件名` / `次数` / `目标轨` / `L/R`，扩展多选置灰）与右侧 15 Tab 3 列 `ttk.Treeview`（`ID` / `文件名` / `L/R` 实时同步）保持**严格选中互斥**（切 Tab 保留左选并清空右选）+ 左/右列表联动 WASAPI Shared 单音试听 + 点击左右列表空白区取消选中 + 设置项可选开启左侧直接点「移除」；全局复选框文案为 `所有切片左右声道互换` / `Swap L/R for All Slices` / `全スライスのL/Rを反転`；中间栏 `⇄ L/R` 单切片/批量声道翻转按钮；键盘 `→` / `←` 快捷触发加入/移除（输入控件聚焦时不劫持光标）；`Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` 撤销重做栈与未导出 `dirty` 关闭拦截。
 - **按文件名猜轨与声像分流**：支持 `HH Open` 拼写容错（如 `opend`）与 `bell` 去误伤（仅 `ride/cym + bell` 归 `RD`）；存在显式 Crash 且无显式 Ride 时将泛称 `cymbal/cym` 隔离至 `RD`；对 `crash/cymbal` 执行轻量立体声左右 RMS 差（≥ 1.5 dB）自动分流 `LC`/`CY`（遵循当前 `effective_swap`）；猜轨完成后弹出置顶红字提示人工复查。
-- **LP Tab 双行扩展**：仅在 `LP` Tab 顶部显示默认绑定 + 阈值模式单选（第 1 行）与 `LP 补足` 下拉 / 音量微调框 / 阈值输入框（第 2 行），并为 `LP 补足` 控件挂载 **1000ms** 延迟悬停 Tooltip。
+- **LP Tab 双行顶部 + 紧凑底部播放栏**：`LP` Tab 顶部保留默认绑定 + 阈值模式单选（第 1 行）与 `LP 补足` 下拉（含 **1000ms** 延迟悬停 Tooltip）/ `使用 ZY` 勾选框（默认关闭）/ 阈值输入框（第 2 行）；列表最下方固定显示 `▶` 试听按钮（按当前音量百分比与 `effective_swap` 播放）+ 目标切片 ID/文件名（超长截断 + 悬停全名）+ 音量框（默认 `100`%，`无`/`ZZ: 空音`/无可用切片时禁用对应控件，未勾 `使用 ZY` 时禁用音量框）。
 - **格式与媒体增强**：
   - 原生 `#GENRE:`（`;` 转全角 `；`）、固定 `#COMMENT: via bms2dtx`、`#WAVxx` 行尾 `\t;<LABEL>` 注释（支持自定义与清洗）；
   - 2 级 `#PREVIEW`（先头部显式定义，未定义则扫描母目录未入谱 `preview*` 音频）；

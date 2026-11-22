@@ -211,6 +211,7 @@ class AssignmentModel:
             note_num=int(cfg.note_num),
             note_den=int(cfg.note_den),
             threshold_ms=float(cfg.threshold_ms),
+            use_zy=bool(cfg.use_zy),
         )
 
     def clear(self) -> None:
@@ -692,6 +693,28 @@ def format_wav_row(
     return text
 
 
+def format_tab_tree_values(
+    entry: Optional[WavEntry],
+    wav_id: str,
+    *,
+    chart: Optional[BmsChart] = None,
+    group_ids: Optional[Sequence[str]] = None,
+    effective_swap_lr: bool = False,
+) -> Tuple[str, str, str]:
+    """Return 3 column strings `(ID, Filename, L/R)` for right-hand Tab ttk.Treeview."""
+    if group_ids is None and chart is not None:
+        group_ids = wav_group_for(chart, wav_id)
+    ids_label = ", ".join(group_ids) if group_ids else wav_id
+    if entry is None:
+        fname = tr("tag_undeclared")
+    else:
+        fname = entry.resolved_name
+        if not entry.exists:
+            fname = f"{fname} {tr('tag_missing')}"
+    lr_str = "✓" if effective_swap_lr else "✗"
+    return (ids_label, fname, lr_str)
+
+
 def format_tab_row(
     entry: Optional[WavEntry],
     wav_id: str,
@@ -708,6 +731,40 @@ def format_tab_row(
     if not entry.exists:
         text += f" {tr('tag_missing')}"
     return text
+
+
+def resolve_auto_lp_target_wav_id(
+    model: AssignmentModel, chart: Optional[BmsChart]
+) -> Optional[str]:
+    """Resolve the representative BMS WAV ID that Auto-LP will sound with, or None."""
+    active_chart = chart if chart is not None else model.chart
+    raw_mode = str(model.auto_lp.chip_mode or AUTO_LP_CHIP_NONE).strip()
+    mode_lower = raw_mode.lower()
+    if mode_lower in ("", AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_EMPTY_ZZ):
+        return None
+    lp_display_ids = model.display_ids_for_tab(TabId.LP, active_chart)
+    if not lp_display_ids:
+        return None
+
+    chosen_orig: Optional[str] = None
+    if mode_lower == AUTO_LP_CHIP_AUTO:
+        lp_orig, _is_auto = model.effective_bind(TabId.LP, active_chart)
+        if lp_orig is None:
+            lp_orig = model.auto_bind_for_tab(TabId.LP, active_chart)
+        chosen_orig = lp_orig
+    else:
+        cand = normalize_wav_id(active_chart, raw_mode)
+        if cand in model.tab_wavs[TabId.LP]:
+            chosen_orig = cand
+
+    if chosen_orig is None:
+        return None
+    if active_chart is not None:
+        _rep_to_group, wid_to_rep = wav_physical_groups(active_chart)
+        rep = wid_to_rep.get(chosen_orig, chosen_orig)
+        if rep in lp_display_ids:
+            return rep
+    return chosen_orig if chosen_orig in lp_display_ids else lp_display_ids[0]
 
 
 def auto_lp_combobox_values(

@@ -53,7 +53,7 @@ from .helpers import (
     check_output_dir,
     default_dlevel_text,
     filter_wav_ids,
-    format_tab_row,
+    format_tab_tree_values,
     format_warnings,
     format_wav_tree_values,
     get_no_bind_label,
@@ -61,6 +61,7 @@ from .helpers import (
     load_mapping_json,
     parse_dlevel,
     radix_needs_notice,
+    resolve_auto_lp_target_wav_id,
     save_mapping_json,
     suggest_load_mapping_location,
     suggest_output_dir,
@@ -188,21 +189,22 @@ class _Tooltip:
 
 
 class TabPanel:
-    """One right-hand Tab page: note, optional default-bind Combobox, Listbox."""
+    """One right-hand Tab page: note, optional default-bind Combobox, 3-col Treeview, and LP bottom bar."""
 
     def __init__(self, app: "App", parent: ttk.Frame, tab: TabId) -> None:
         self.app = app
         self.tab = tab
         self.frame = ttk.Frame(parent, padding=6)
         self.ids: List[str] = []
+        self._id_set: set[str] = set()
         self.bind_ids: List[Optional[str]] = [None]
         self.note_label: Optional[ttk.Label] = None
         self.bind_label: Optional[ttk.Label] = None
         self.combo: Optional[ttk.Combobox] = None
         self.combo_var = tk.StringVar(value=get_no_bind_label())
-        self._arrow_previewed_idx: Optional[int] = None
+        self._arrow_previewed_iid: Optional[str] = None
 
-        # LP-only Auto-LP dual-row controls
+        # LP-only Auto-LP controls
         self._suppress_auto_lp_sync = False
         self.auto_lp_mode_note_rb: Optional[ttk.Radiobutton] = None
         self.auto_lp_mode_ms_rb: Optional[ttk.Radiobutton] = None
@@ -210,9 +212,16 @@ class TabPanel:
         self.auto_lp_combo: Optional[ttk.Combobox] = None
         self.auto_lp_chip_values: List[str] = [AUTO_LP_CHIP_NONE]
         self.auto_lp_chip_var = tk.StringVar()
+        self.auto_lp_use_zy_var = tk.BooleanVar(value=False)
+        self.auto_lp_use_zy_chk: Optional[ttk.Checkbutton] = None
+        self.auto_lp_bottom_frame: Optional[ttk.Frame] = None
+        self.auto_lp_play_btn: Optional[ttk.Button] = None
+        self.auto_lp_target_var = tk.StringVar(value=tr("auto_lp_target_none"))
+        self.auto_lp_target_label: Optional[ttk.Label] = None
+        self._auto_lp_target_full_text: str = tr("auto_lp_target_none")
         self.auto_lp_vol_label: Optional[ttk.Label] = None
         self.auto_lp_vol_spin: Optional[tk.Spinbox] = None
-        self.auto_lp_vol_var = tk.StringVar(value="50")
+        self.auto_lp_vol_var = tk.StringVar(value="100")
         self.auto_lp_thresh_mode_var = tk.StringVar(value=AUTO_LP_THRESHOLD_NOTE)
         self.auto_lp_num_var = tk.StringVar(value="1")
         self.auto_lp_den_var = tk.StringVar(value="4")
@@ -224,6 +233,9 @@ class TabPanel:
         self._lp_thresh_ms_frame: Optional[ttk.Frame] = None
         self._lp_tip_label: Optional[_Tooltip] = None
         self._lp_tip_combo: Optional[_Tooltip] = None
+        self._lp_tip_zy: Optional[_Tooltip] = None
+        self._lp_tip_play: Optional[_Tooltip] = None
+        self._lp_tip_target: Optional[_Tooltip] = None
 
         row = 0
         note = get_tab_note(tab)
@@ -234,7 +246,6 @@ class TabPanel:
             self.note_label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
             row += 1
         if tab == TabId.LP:
-            # Dual-row compact header for LP Tab:
             # Row 1: compact Default bind | Threshold mode radios (Note Value vs ms)
             lp_row1 = ttk.Frame(self.frame)
             lp_row1.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 3))
@@ -269,7 +280,7 @@ class TabPanel:
             self.auto_lp_mode_ms_rb.grid(row=0, column=3, sticky="e", padx=(6, 0))
             row += 1
 
-            # Row 2: Auto-LP chip selector | Vol (0-100) | <= threshold
+            # Row 2: Auto-LP chip selector | Use ZY checkbox | <= threshold
             lp_row2 = ttk.Frame(self.frame)
             lp_row2.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6))
             lp_row2.columnconfigure(1, weight=1)
@@ -291,19 +302,16 @@ class TabPanel:
                 self.auto_lp_combo, lambda: tr("auto_lp_tooltip"), delay_ms=1000
             )
 
-            self.auto_lp_vol_label = ttk.Label(lp_row2, text=tr("auto_lp_vol_label"))
-            self.auto_lp_vol_label.grid(row=0, column=2, sticky="e", padx=(0, 2))
-            self.auto_lp_vol_spin = tk.Spinbox(
+            self.auto_lp_use_zy_chk = ttk.Checkbutton(
                 lp_row2,
-                from_=0,
-                to=100,
-                width=4,
-                textvariable=self.auto_lp_vol_var,
+                text=tr("auto_lp_use_zy_chk"),
+                variable=self.auto_lp_use_zy_var,
                 command=self._on_auto_lp_changed,
             )
-            self.auto_lp_vol_spin.grid(row=0, column=3, sticky="e", padx=(0, 6))
-            self.auto_lp_vol_spin.bind("<FocusOut>", self._on_auto_lp_changed)
-            self.auto_lp_vol_spin.bind("<Return>", self._on_auto_lp_changed)
+            self.auto_lp_use_zy_chk.grid(row=0, column=2, sticky="e", padx=(0, 6))
+            self._lp_tip_zy = _Tooltip(
+                self.auto_lp_use_zy_chk, lambda: tr("auto_lp_use_zy_tooltip")
+            )
 
             self._lp_thresh_note_frame = ttk.Frame(lp_row2)
             ttk.Label(self._lp_thresh_note_frame, text="<=").pack(side="left", padx=(0, 2))
@@ -334,7 +342,7 @@ class TabPanel:
             self.auto_lp_ms_entry.bind("<Return>", self._on_auto_lp_changed)
             ttk.Label(self._lp_thresh_ms_frame, text="ms").pack(side="left", padx=(2, 0))
 
-            self._lp_thresh_note_frame.grid(row=0, column=4, sticky="e")
+            self._lp_thresh_note_frame.grid(row=0, column=3, sticky="e")
             row += 1
         elif tab_has_bind_combobox(tab):
             self.bind_label = ttk.Label(self.frame, text=tr("default_bind_label"))
@@ -350,43 +358,136 @@ class TabPanel:
             self.combo.bind("<<ComboboxSelected>>", self._on_bind_selected)
             row += 1
 
-        self.listbox = tk.Listbox(
-            self.frame, selectmode=tk.EXTENDED, exportselection=False, activestyle="dotbox"
+        # 3-column ttk.Treeview: ID | Filename | L/R
+        tree_row = row
+        self.tree = ttk.Treeview(
+            self.frame,
+            columns=("id", "filename", "lr"),
+            show="headings",
+            selectmode="extended",
         )
-        scroll = ttk.Scrollbar(self.frame, orient="vertical", command=self.listbox.yview)
-        self.listbox.configure(yscrollcommand=scroll.set)
-        self.listbox.grid(row=row, column=0, sticky="nsew")
-        scroll.grid(row=row, column=1, sticky="ns")
-        self.frame.rowconfigure(row, weight=1)
+        s = getattr(self.app, "_dpi_scale", 1.0)
+        self.tree.column("id", width=int(56 * s), minwidth=44, stretch=False, anchor="w")
+        self.tree.column("filename", width=int(210 * s), minwidth=100, stretch=True, anchor="w")
+        self.tree.column("lr", width=int(42 * s), minwidth=36, stretch=False, anchor="center")
+        self._apply_tree_headings()
+        self.tree.tag_configure("missing", foreground=ERROR_RED)
+
+        scroll = ttk.Scrollbar(self.frame, orient="vertical", command=self.tree.yview)
+        xscroll = ttk.Scrollbar(self.frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scroll.set, xscrollcommand=xscroll.set)
+        self.tree.grid(row=tree_row, column=0, sticky="nsew")
+        scroll.grid(row=tree_row, column=1, sticky="ns")
+        xscroll.grid(row=tree_row + 1, column=0, sticky="ew")
+        self.frame.rowconfigure(tree_row, weight=1)
         self.frame.columnconfigure(0, weight=1)
 
-        self.listbox.bind("<FocusIn>", lambda _e: self.app._set_focus_side("right"))
-        self.listbox.bind("<Button-1>", self._on_right_click)
-        self.listbox.bind("<KeyPress-Up>", self._on_right_arrow_press)
-        self.listbox.bind("<KeyPress-Down>", self._on_right_arrow_press)
-        self.listbox.bind("<KeyRelease-Up>", self._on_right_arrow_release)
-        self.listbox.bind("<KeyRelease-Down>", self._on_right_arrow_release)
-        self.listbox.bind(
+        self.tree.bind("<FocusIn>", lambda _e: self.app._set_focus_side("right"))
+        self.tree.bind("<<TreeviewSelect>>", self._on_right_tree_select)
+        self.tree.bind("<Button-1>", self._on_right_click)
+        self.tree.bind("<KeyPress-Up>", self._on_right_arrow_press)
+        self.tree.bind("<KeyPress-Down>", self._on_right_arrow_press)
+        self.tree.bind("<KeyRelease-Up>", self._on_right_arrow_release)
+        self.tree.bind("<KeyRelease-Down>", self._on_right_arrow_release)
+        self.tree.bind(
             "<Double-Button-1>",
             lambda _e: (
                 None if self.app.auto_preview_var.get() else self.app.preview_from_tab(self.tab),
                 "break",
             )[1],
         )
-        self.listbox.bind("<space>", lambda _e: (self.app.preview_from_tab(self.tab), "break")[1])
+        self.tree.bind("<space>", lambda _e: (self.app.preview_from_tab(self.tab), "break")[1])
+
+        if tab == TabId.LP:
+            bottom_row = tree_row + 2
+            self.auto_lp_bottom_frame = ttk.Frame(self.frame)
+            self.auto_lp_bottom_frame.grid(
+                row=bottom_row, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+            )
+            self.auto_lp_bottom_frame.columnconfigure(1, weight=1)
+
+            self.auto_lp_play_btn = ttk.Button(
+                self.auto_lp_bottom_frame,
+                text="▶",
+                width=3,
+                command=self._on_auto_lp_preview,
+            )
+            self.auto_lp_play_btn.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            self._lp_tip_play = _Tooltip(
+                self.auto_lp_play_btn, lambda: tr("auto_lp_play_tooltip")
+            )
+
+            self.auto_lp_target_label = ttk.Label(
+                self.auto_lp_bottom_frame,
+                textvariable=self.auto_lp_target_var,
+                anchor="w",
+                foreground="#222222",
+            )
+            self.auto_lp_target_label.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+            self._lp_tip_target = _Tooltip(
+                self.auto_lp_target_label, lambda: self._auto_lp_target_full_text
+            )
+
+            self.auto_lp_vol_label = ttk.Label(
+                self.auto_lp_bottom_frame, text=tr("auto_lp_vol_label")
+            )
+            self.auto_lp_vol_label.grid(row=0, column=2, sticky="e", padx=(0, 3))
+
+            vol_wrap = ttk.Frame(self.auto_lp_bottom_frame)
+            vol_wrap.grid(row=0, column=3, sticky="e")
+            self.auto_lp_vol_spin = tk.Spinbox(
+                vol_wrap,
+                from_=0,
+                to=100,
+                width=4,
+                textvariable=self.auto_lp_vol_var,
+                command=self._on_auto_lp_changed,
+            )
+            self.auto_lp_vol_spin.pack(side="left")
+            self.auto_lp_vol_spin.bind("<FocusOut>", self._on_auto_lp_changed)
+            self.auto_lp_vol_spin.bind("<Return>", self._on_auto_lp_changed)
+            ttk.Label(vol_wrap, text="%").pack(side="left", padx=(2, 0))
+
+    def _apply_tree_headings(self) -> None:
+        self.tree.heading("id", text=tr("col_id"), anchor="w")
+        self.tree.heading("filename", text=tr("col_filename"), anchor="w")
+        self.tree.heading("lr", text=tr("col_lr"), anchor="center")
+
+    def clear_selection(self) -> None:
+        sel = self.tree.selection()
+        if sel:
+            self.tree.selection_remove(*sel)
+
+    def _on_right_tree_select(self, _event: Any = None) -> None:
+        if self.app._suppress_select_count > 0:
+            return
+        if not self.tree.selection():
+            return
+        self.app._suppress_select_count += 1
+        try:
+            self.app._set_focus_side("right")
+            self.app._clear_left_selection()
+            for t, panel in self.app.panels.items():
+                if t != self.tab:
+                    panel.clear_selection()
+        finally:
+            self.app._queue_end_suppress_select()
 
     def _on_right_click(self, event: Any) -> Optional[str]:
         self.app._set_focus_side("right")
-        if not self.ids:
-            self.listbox.selection_clear(0, tk.END)
+        region = self.tree.identify_region(event.x, event.y)
+        row_iid = self.tree.identify_row(event.y)
+        if not row_iid and region not in ("heading", "separator"):
+            self.clear_selection()
             return "break"
-        idx = self.listbox.nearest(event.y)
-        bbox = self.listbox.bbox(idx) if idx >= 0 else None
-        if bbox is None or event.y < bbox[1] or event.y > bbox[1] + bbox[3]:
-            self.listbox.selection_clear(0, tk.END)
-            return "break"
-        if self.app.auto_preview_var.get() and self.app.chart is not None and 0 <= idx < len(self.ids):
-            self.app._play_wav_id(self.ids[idx])
+        if (
+            self.ids
+            and row_iid
+            and row_iid in self._id_set
+            and self.app.auto_preview_var.get()
+            and self.app.chart is not None
+        ):
+            self.app._play_wav_id(row_iid)
         return None
 
     def _on_right_arrow_press(self, _event: Any = None) -> None:
@@ -401,27 +502,21 @@ class TabPanel:
     def _on_right_arrow_after_keypress(self) -> None:
         if not self.app.auto_preview_var.get() or self.app.chart is None or not self.ids:
             return
-        try:
-            active_idx = int(self.listbox.index(tk.ACTIVE))
-        except Exception:
-            return
-        if 0 <= active_idx < len(self.ids):
-            self._arrow_previewed_idx = active_idx
-            self.app._play_wav_id(self.ids[active_idx])
+        focus_iid = self.tree.focus()
+        if focus_iid and focus_iid in self._id_set:
+            self._arrow_previewed_iid = focus_iid
+            self.app._play_wav_id(focus_iid)
 
     def _on_right_arrow_release(self, _event: Any = None) -> None:
         if not self.app.auto_preview_var.get() or self.app.chart is None or not self.ids:
             return
-        try:
-            active_idx = int(self.listbox.index(tk.ACTIVE))
-        except Exception:
+        focus_iid = self.tree.focus()
+        if self._arrow_previewed_iid == focus_iid:
+            self._arrow_previewed_iid = None
             return
-        if self._arrow_previewed_idx == active_idx:
-            self._arrow_previewed_idx = None
-            return
-        self._arrow_previewed_idx = None
-        if 0 <= active_idx < len(self.ids):
-            self.app._play_wav_id(self.ids[active_idx])
+        self._arrow_previewed_iid = None
+        if focus_iid and focus_iid in self._id_set:
+            self.app._play_wav_id(focus_iid)
 
     def _on_bind_selected(self, _event: Any = None) -> None:
         idx = self.combo.current() if self.combo is not None else 0
@@ -443,12 +538,30 @@ class TabPanel:
         self.app.set_status(
             tr("status_bind_updated", tab=tab_label(self.tab), wav=wav_label)
         )
+        if self.tab == TabId.LP:
+            self._refresh_auto_lp_controls()
 
     def _on_auto_lp_changed(self, _event: Any = None) -> None:
         if self.tab != TabId.LP or self._suppress_auto_lp_sync:
             return
         self.sync_auto_lp_to_model(push_undo=True)
         self._refresh_auto_lp_controls()
+
+    def _on_auto_lp_preview(self) -> None:
+        if self.tab != TabId.LP or self.app.chart is None:
+            return
+        target_wid = resolve_auto_lp_target_wav_id(self.app.model, self.app.chart)
+        if target_wid is None:
+            return
+        try:
+            vol = max(0, min(100, int(self.auto_lp_vol_var.get().strip())))
+        except ValueError:
+            vol = max(0, min(100, int(self.app.model.auto_lp.volume)))
+        gain = (vol / 100.0) if bool(self.auto_lp_use_zy_var.get()) else 1.0
+        eff_swap = self.app.model.is_effective_swap_lr(
+            target_wid, global_swap_lr=bool(self.app.swap_lr_var.get())
+        )
+        self.app._play_wav_id(target_wid, swap_lr=eff_swap, gain=gain)
 
     def sync_auto_lp_to_model(self, *, push_undo: bool = True) -> None:
         """Read LP Tab Auto-LP widgets into ``model.auto_lp`` cleanly."""
@@ -460,6 +573,8 @@ class TabPanel:
         cidx = self.auto_lp_combo.current()
         if 0 <= cidx < len(self.auto_lp_chip_values):
             alp.chip_mode = self.auto_lp_chip_values[cidx]
+
+        alp.use_zy = bool(self.auto_lp_use_zy_var.get())
 
         tmode = self.auto_lp_thresh_mode_var.get()
         alp.threshold_mode = (
@@ -514,28 +629,70 @@ class TabPanel:
                 alp.chip_mode = AUTO_LP_CHIP_NONE
             self.auto_lp_combo.current(target_idx)
 
+            self.auto_lp_use_zy_var.set(bool(alp.use_zy))
             self.auto_lp_thresh_mode_var.set(alp.threshold_mode)
             self.auto_lp_vol_var.set(str(alp.volume))
             self.auto_lp_num_var.set(str(alp.note_num))
             self.auto_lp_den_var.set(str(alp.note_den))
             self.auto_lp_ms_var.set(f"{alp.threshold_ms:g}")
 
-            # Disable volume box when chip_mode is None or ZZ: Silent
+            target_wid = resolve_auto_lp_target_wav_id(model, chart)
+            has_real_target = target_wid is not None
+            chip_lower = str(alp.chip_mode or AUTO_LP_CHIP_NONE).strip().lower()
+
+            if chip_lower == AUTO_LP_CHIP_EMPTY_ZZ:
+                full_text = tr("auto_lp_target_zz")
+                display_text = full_text
+            elif chip_lower in ("", AUTO_LP_CHIP_NONE):
+                full_text = tr("auto_lp_target_none")
+                display_text = full_text
+            elif target_wid is None:
+                full_text = tr("auto_lp_target_no_slice")
+                display_text = full_text
+            else:
+                entry = chart.wavs.get(target_wid) if chart is not None else None
+                fname = entry.resolved_name if entry is not None else tr("tag_undeclared")
+                if entry is not None and not entry.exists:
+                    fname = f"{fname} {tr('tag_missing')}"
+                full_text = f"{target_wid} {fname}"
+                display_text = full_text if len(full_text) <= 28 else f"{full_text[:27]}…"
+
+            self._auto_lp_target_full_text = full_text
+            self.auto_lp_target_var.set(display_text)
+            if self.auto_lp_target_label is not None:
+                self.auto_lp_target_label.configure(
+                    foreground="#222222" if has_real_target else "#777777"
+                )
+
+            if self.auto_lp_use_zy_chk is not None:
+                self.auto_lp_use_zy_chk.configure(
+                    state="normal" if has_real_target else "disabled"
+                )
             if self.auto_lp_vol_spin is not None:
-                vol_enabled = alp.chip_mode not in (AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_EMPTY_ZZ)
+                vol_enabled = has_real_target and bool(alp.use_zy)
                 self.auto_lp_vol_spin.configure(state="normal" if vol_enabled else "disabled")
+            if self.auto_lp_play_btn is not None:
+                entry = chart.wavs.get(target_wid) if (chart is not None and target_wid) else None
+                can_play = (
+                    has_real_target
+                    and entry is not None
+                    and entry.exists
+                    and entry.resolved_path is not None
+                )
+                self.auto_lp_play_btn.configure(state="normal" if can_play else "disabled")
 
             if self._lp_thresh_note_frame is not None and self._lp_thresh_ms_frame is not None:
                 if alp.threshold_mode == AUTO_LP_THRESHOLD_MS:
                     self._lp_thresh_note_frame.grid_remove()
-                    self._lp_thresh_ms_frame.grid(row=0, column=4, sticky="e")
+                    self._lp_thresh_ms_frame.grid(row=0, column=3, sticky="e")
                 else:
                     self._lp_thresh_ms_frame.grid_remove()
-                    self._lp_thresh_note_frame.grid(row=0, column=4, sticky="e")
+                    self._lp_thresh_note_frame.grid(row=0, column=3, sticky="e")
         finally:
             self._suppress_auto_lp_sync = False
 
     def update_language_texts(self) -> None:
+        self._apply_tree_headings()
         if self.note_label is not None:
             note = get_tab_note(self.tab)
             if note is not None:
@@ -547,6 +704,8 @@ class TabPanel:
         if self.tab == TabId.LP:
             if self.auto_lp_label is not None:
                 self.auto_lp_label.configure(text=tr("auto_lp_label"))
+            if self.auto_lp_use_zy_chk is not None:
+                self.auto_lp_use_zy_chk.configure(text=tr("auto_lp_use_zy_chk"))
             if self.auto_lp_vol_label is not None:
                 self.auto_lp_vol_label.configure(text=tr("auto_lp_vol_label"))
             if self.auto_lp_mode_note_rb is not None:
@@ -558,14 +717,47 @@ class TabPanel:
     def refresh(self) -> None:
         model = self.app.model
         chart = self.app.chart
-        keep_sel = {self.ids[i] for i in self.listbox.curselection() if i < len(self.ids)}
-        self.ids = model.display_ids_for_tab(self.tab, chart)
-        self.listbox.delete(0, tk.END)
-        for idx, wid in enumerate(self.ids):
-            entry = chart.wavs.get(wid) if chart else None
-            self.listbox.insert(tk.END, format_tab_row(entry, wid, chart=chart))
-            if wid in keep_sel:
-                self.listbox.selection_set(idx)
+        keep_sel = set(self.tree.selection())
+        keep_focus = self.tree.focus()
+        try:
+            yview = self.tree.yview()[0]
+        except Exception:
+            yview = 0.0
+        self.app._suppress_select_count += 1
+        try:
+            children = self.tree.get_children("")
+            if children:
+                self.tree.delete(*children)
+            self.ids = model.display_ids_for_tab(self.tab, chart)
+            self._id_set = set(self.ids)
+            rep_to_group = wav_physical_groups(chart)[0] if chart is not None else {}
+            global_swap = bool(self.app.swap_lr_var.get())
+            to_select: List[str] = []
+            for wid in self.ids:
+                entry = chart.wavs.get(wid) if chart else None
+                values = format_tab_tree_values(
+                    entry,
+                    wid,
+                    chart=chart,
+                    group_ids=rep_to_group.get(wid),
+                    effective_swap_lr=model.is_effective_swap_lr(
+                        wid, global_swap_lr=global_swap
+                    ),
+                )
+                tags: tuple[str, ...] = (
+                    ("missing",) if (entry is not None and not entry.exists) else ()
+                )
+                self.tree.insert("", tk.END, iid=wid, values=values, tags=tags)
+                if wid in keep_sel:
+                    to_select.append(wid)
+            if to_select:
+                self.tree.selection_set(tuple(to_select))
+            if keep_focus and keep_focus in self._id_set:
+                self.tree.focus(keep_focus)
+            self.tree.yview_moveto(yview)
+        finally:
+            self.app._queue_end_suppress_select()
+
         if self.combo is not None:
             values = bind_combobox_values(model, chart, self.tab)
             self.bind_ids = [token for _text, token in values]
@@ -604,7 +796,7 @@ class TabPanel:
             self._refresh_auto_lp_controls()
 
     def selected_ids(self) -> List[str]:
-        return [self.ids[i] for i in self.listbox.curselection() if i < len(self.ids)]
+        return [iid for iid in self.tree.selection() if iid in self._id_set]
 
 
 class App:
@@ -644,6 +836,7 @@ class App:
         self._left_id_set: set[str] = set()
         self._active_tab: TabId = TabId.LC
         self._last_focus_side: str = "left"
+        self._suppress_select_count: int = 0
         self._arrow_previewed_iid: Optional[str] = None
         self._queue: "queue.Queue[tuple]" = queue.Queue()
         self._ffmpeg_warned = False
@@ -792,14 +985,57 @@ class App:
         self.load_bms(candidate)
 
     def _bind_hotkeys(self) -> None:
+        self.root.bind("<<Bms2dtxEndSuppress>>", self._on_end_suppress_select)
         for seq in ("<Control-z>", "<Control-Z>"):
             self.root.bind_all(seq, self._on_ctrl_z)
         for seq in ("<Control-y>", "<Control-Y>", "<Control-Shift-z>", "<Control-Shift-Z>"):
             self.root.bind_all(seq, self._on_ctrl_y)
+        self.root.bind_all("<Right>", self._on_key_right)
+        self.root.bind_all("<Left>", self._on_key_left)
 
     @staticmethod
     def _is_text_input_focused(widget: Optional[tk.Misc]) -> bool:
-        return isinstance(widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text, tk.Spinbox))
+        if widget is None:
+            return False
+        if isinstance(widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text, tk.Spinbox)):
+            return True
+        spinbox_cls = getattr(ttk, "Spinbox", None)
+        if spinbox_cls is not None and isinstance(widget, spinbox_cls):
+            return True
+        try:
+            wclass = widget.winfo_class()
+        except Exception:
+            return False
+        return wclass in ("Entry", "TEntry", "Spinbox", "TSpinbox", "TCombobox", "Text")
+
+    def _can_trigger_list_arrow_shortcut(self) -> bool:
+        if self._busy or self.chart is None:
+            return False
+        try:
+            focus = self.root.focus_get()
+        except Exception:
+            focus = None
+        if self._is_text_input_focused(focus):
+            return False
+        if focus is not None:
+            try:
+                if focus.winfo_toplevel() != self.root:
+                    return False
+            except Exception:
+                pass
+        return True
+
+    def _on_key_right(self, _event: Any = None) -> Optional[str]:
+        if not self._can_trigger_list_arrow_shortcut():
+            return None
+        self.on_add()
+        return "break"
+
+    def _on_key_left(self, _event: Any = None) -> Optional[str]:
+        if not self._can_trigger_list_arrow_shortcut():
+            return None
+        self.on_remove()
+        return "break"
 
     def _on_ctrl_z(self, _event: Any = None) -> Optional[str]:
         try:
@@ -945,6 +1181,7 @@ class App:
         xscroll.grid(row=2, column=0, sticky="ew")
 
         self.left_tree.bind("<FocusIn>", lambda _e: self._set_focus_side("left"))
+        self.left_tree.bind("<<TreeviewSelect>>", self._on_left_tree_select)
         self.left_tree.bind("<Button-1>", self._on_left_click)
         self.left_tree.bind("<KeyPress-Up>", self._on_left_arrow_press)
         self.left_tree.bind("<KeyPress-Down>", self._on_left_arrow_press)
@@ -1191,7 +1428,7 @@ class App:
     def _on_swap_lr_toggled(self) -> None:
         self.model.swap_lr = bool(self.swap_lr_var.get())
         self._update_dirty_flag()
-        self.refresh_left()
+        self.refresh_all()
 
     # ---------------------------------------------------- settings & i18n
     def change_language(self, lang_code: str) -> None:
@@ -1535,12 +1772,19 @@ class App:
             self.separate_lbd_var.set(True)
             self.model.set_separate_lbd(True)
             self._rebuild_tab_grid()
-        for t, panel in self.panels.items():
-            if t == tab:
-                panel.frame.grid(row=0, column=0, sticky="nsew")
-            else:
-                panel.frame.grid_remove()
+        self._suppress_select_count += 1
+        try:
+            for t, panel in self.panels.items():
+                panel.clear_selection()
+                if t == tab:
+                    panel.frame.grid(row=0, column=0, sticky="nsew")
+                else:
+                    panel.frame.grid_remove()
+        finally:
+            self._queue_end_suppress_select()
         self._active_tab = tab
+        if self.left_tree.selection():
+            self._last_focus_side = "left"
         self._update_tab_button_styles()
 
     def _on_toggle_separate_lbd(self) -> None:
@@ -1882,66 +2126,97 @@ class App:
         self.panels[tab].refresh()
         self._update_tab_button_styles()
 
+    def _on_end_suppress_select(self, _event: Any = None) -> None:
+        self._suppress_select_count = max(0, self._suppress_select_count - 1)
+
+    def _queue_end_suppress_select(self) -> None:
+        try:
+            self.root.event_generate("<<Bms2dtxEndSuppress>>", when="tail")
+        except tk.TclError:
+            self._suppress_select_count = max(0, self._suppress_select_count - 1)
+
+    def _clear_left_selection(self) -> None:
+        sel = self.left_tree.selection()
+        if sel:
+            self.left_tree.selection_remove(*sel)
+
+    def _on_left_tree_select(self, _event: Any = None) -> None:
+        if self._suppress_select_count > 0:
+            return
+        if not self.left_tree.selection():
+            return
+        self._suppress_select_count += 1
+        try:
+            self._set_focus_side("left")
+            for panel in self.panels.values():
+                panel.clear_selection()
+        finally:
+            self._queue_end_suppress_select()
+
     def refresh_left(self) -> None:
         keep_sel = set(self.left_tree.selection())
         keep_focus = self.left_tree.focus()
         yview = self.left_tree.yview()[0]
-        children = self.left_tree.get_children("")
-        if children:
-            self.left_tree.delete(*children)
-        self._left_ids = []
-        self._left_id_set = set()
-        if self.chart is None:
-            self.left_count_var.set("")
-            return
-        owner = {wid: t for t, ids in self.model.tab_wavs.items() for wid in ids}
-        self._left_ids = filter_wav_ids(
-            self.chart, self.search_var.get(), self.only_used_var.get()
-        )
-        self._left_id_set = set(self._left_ids)
-        rep_to_group, _wid_to_rep = wav_physical_groups(self.chart)
-        all_groups = list(rep_to_group.keys())
-        assigned_groups = 0
-        for rep_id in all_groups:
-            if owner.get(rep_id) is not None:
-                assigned_groups += 1
+        self._suppress_select_count += 1
+        try:
+            children = self.left_tree.get_children("")
+            if children:
+                self.left_tree.delete(*children)
+            self._left_ids = []
+            self._left_id_set = set()
+            if self.chart is None:
+                self.left_count_var.set("")
+                return
+            owner = {wid: t for t, ids in self.model.tab_wavs.items() for wid in ids}
+            self._left_ids = filter_wav_ids(
+                self.chart, self.search_var.get(), self.only_used_var.get()
+            )
+            self._left_id_set = set(self._left_ids)
+            rep_to_group, _wid_to_rep = wav_physical_groups(self.chart)
+            all_groups = list(rep_to_group.keys())
+            assigned_groups = 0
+            for rep_id in all_groups:
+                if owner.get(rep_id) is not None:
+                    assigned_groups += 1
 
-        to_select: List[str] = []
-        global_swap = bool(self.swap_lr_var.get())
-        for wid in self._left_ids:
-            tab = owner.get(wid)
-            entry = self.chart.wavs[wid]
-            values = format_wav_tree_values(
-                entry,
-                tab,
-                chart=self.chart,
-                group_ids=rep_to_group.get(wid),
-                effective_swap_lr=self.model.is_effective_swap_lr(
-                    wid, global_swap_lr=global_swap
-                ),
+            to_select: List[str] = []
+            global_swap = bool(self.swap_lr_var.get())
+            for wid in self._left_ids:
+                tab = owner.get(wid)
+                entry = self.chart.wavs[wid]
+                values = format_wav_tree_values(
+                    entry,
+                    tab,
+                    chart=self.chart,
+                    group_ids=rep_to_group.get(wid),
+                    effective_swap_lr=self.model.is_effective_swap_lr(
+                        wid, global_swap_lr=global_swap
+                    ),
+                )
+                if tab is not None:
+                    tags: tuple[str, ...] = ("assigned",)
+                elif not entry.exists:
+                    tags = ("missing",)
+                else:
+                    tags = ()
+                self.left_tree.insert("", tk.END, iid=wid, values=values, tags=tags)
+                if wid in keep_sel:
+                    to_select.append(wid)
+            if to_select:
+                self.left_tree.selection_set(tuple(to_select))
+            if keep_focus and keep_focus in self._left_id_set:
+                self.left_tree.focus(keep_focus)
+            self.left_tree.yview_moveto(yview)
+            self.left_count_var.set(
+                tr(
+                    "left_count_summary",
+                    shown=len(self._left_ids),
+                    total=len(all_groups),
+                    assigned=assigned_groups,
+                )
             )
-            if tab is not None:
-                tags: tuple[str, ...] = ("assigned",)
-            elif not entry.exists:
-                tags = ("missing",)
-            else:
-                tags = ()
-            self.left_tree.insert("", tk.END, iid=wid, values=values, tags=tags)
-            if wid in keep_sel:
-                to_select.append(wid)
-        if to_select:
-            self.left_tree.selection_set(tuple(to_select))
-        if keep_focus and keep_focus in self._left_id_set:
-            self.left_tree.focus(keep_focus)
-        self.left_tree.yview_moveto(yview)
-        self.left_count_var.set(
-            tr(
-                "left_count_summary",
-                shown=len(self._left_ids),
-                total=len(all_groups),
-                assigned=assigned_groups,
-            )
-        )
+        finally:
+            self._queue_end_suppress_select()
 
     def selected_left_ids(self) -> List[str]:
         return [iid for iid in self.left_tree.selection() if iid in self._left_id_set]
@@ -2029,7 +2304,7 @@ class App:
         if not toggled:
             return
         self._commit_undo(before)
-        self.refresh_left()
+        self.refresh_all()
         self.set_status(tr("status_slice_lr_toggled", count=len(target_ids)))
         if len(target_ids) == 1 and self.auto_preview_var.get():
             self._play_wav_id(target_ids[0])
@@ -2166,7 +2441,13 @@ class App:
         return dlg
 
     # ----------------------------------------------------------------- preview
-    def _play_wav_id(self, wav_id: Optional[str]) -> None:
+    def _play_wav_id(
+        self,
+        wav_id: Optional[str],
+        *,
+        swap_lr: Optional[bool] = None,
+        gain: Optional[float] = None,
+    ) -> None:
         if not wav_id or self.chart is None:
             self.set_status(tr("status_select_slice_first"))
             return
@@ -2174,7 +2455,19 @@ class App:
         if entry is None or not entry.exists or entry.resolved_path is None:
             self.set_status(tr("status_file_missing_no_preview", wav_id=wav_id))
             return
-        if self.model.is_slice_swap_override(wav_id):
+        if swap_lr is not None or gain is not None:
+            eff_swap = (
+                self.model.is_effective_swap_lr(
+                    wav_id, global_swap_lr=bool(self.swap_lr_var.get())
+                )
+                if swap_lr is None
+                else bool(swap_lr)
+            )
+            kwargs: Dict[str, Any] = {"swap_lr": eff_swap}
+            if gain is not None:
+                kwargs["gain"] = float(gain)
+            self.player.play(entry.resolved_path, **kwargs)
+        elif self.model.is_slice_swap_override(wav_id):
             eff_swap = self.model.is_effective_swap_lr(
                 wav_id, global_swap_lr=bool(self.swap_lr_var.get())
             )
@@ -2257,15 +2550,12 @@ class App:
 
     def preview_from_tab(self, tab: TabId) -> bool:
         self._set_focus_side("right")
-        ids = self.panels[tab].selected_ids()
+        panel = self.panels[tab]
+        ids = panel.selected_ids()
         if not ids:
-            panel = self.panels[tab]
-            try:
-                active_idx = int(panel.listbox.index(tk.ACTIVE))
-            except Exception:
-                active_idx = -1
-            if 0 <= active_idx < len(panel.ids):
-                ids = [panel.ids[active_idx]]
+            focus_iid = panel.tree.focus()
+            if focus_iid and focus_iid in panel._id_set:
+                ids = [focus_iid]
         self._play_wav_id(ids[0] if ids else None)
         return True
 

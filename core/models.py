@@ -162,11 +162,12 @@ class AutoLpConfig:
     """Auto-LP (OHH 18 -> CHH 11 automatic LP 1B pedal insertion) configuration."""
 
     chip_mode: str = AUTO_LP_CHIP_NONE  # "none" | "auto" | "empty_zz" | specific BMS WAV ID
-    volume: int = 50  # 0..100 for #VOLUMEZY
+    volume: int = 100  # 0..100 for #VOLUMEZY when use_zy=True
     threshold_mode: str = AUTO_LP_THRESHOLD_NOTE  # "note_value" | "ms"
     note_num: int = 1
     note_den: int = 4  # 2, 4, 6, 8, 12, 16
     threshold_ms: float = 250.0
+    use_zy: bool = False  # False => reuse target LP slice's own WAV slot; True => emit #WAVZY + #VOLUMEZY
 
 
 @dataclass
