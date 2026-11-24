@@ -1,36 +1,46 @@
 # bms2dtx
 
-轻量级 Windows 桌面与命令行工具，用于将 **BMS / BME / BML / PMS** 谱面高效转换为 **DTXMania / DTXCreator** 可直接编辑和游玩的 `.dtx` 工程目录（Toggle = OFF 离线混音工作流，**开箱即用无需安装 FFmpeg**）。
+轻量级 Windows 桌面与命令行工具，将 **BMS / BME / BML / PMS** 谱面无损转换为 **DTXMania / DTXCreator** 可直接编辑和游玩的 `.dtx` 工程目录（Toggle = OFF 离线混音工作流，内置音频引擎，**开箱即用无需安装 FFmpeg**）。
 
 ---
 
 ## 核心特性
 
-- **零损只读原谱**：绝不修改或覆盖原始 BMS 文件夹内的任何文件，自动在独立输出目录生成完整 `.dtx` 与资源。
-- **智能解析与内存修正**：
-  - 编码优先级：`CP932` → `UTF-8-BOM` → `CP932(replace)`；导出支持传统 `CP932` 与 `UTF-8`。
-  - 自动在内存中修正扩展名不一致的音频/图片/BGA（例如谱面写 `.wav` 而磁盘为 `.ogg`/`.flac`/`.mp3`/`.xa`）。
-  - 严格保留 `:00` 占位行以对齐 iBMSC / μBMSC 的 `B1..Bn` BGM 列号，同时剔除全曲空轨。
-  - 完整支持 `#BASE 62` 与超限检测、精确 BPM/exBPM 变速与粘性 `02` 拍号还原、`.bml` 长押（`#LNTYPE 1/2` 与 `#LNOBJ` 起音发声、尾标静默）及 `.pms` 9 键全 18 轨道（`11`–`19` & `21`–`29`）。
-- **15-Tab 视觉映射与单音试听**：
-  - 覆盖 12 鼓轨（`LC`, `HH Close`, `HH Open`, `LP`, `LBD`, `SD`, `HT`, `BD`, `LT`, `FT`, `CY`, `RD`）及 `Other`（`SE6`）、`Guitar`（`SE11-12`）、`Bass`（`SE13-14`），默认隐藏并自动合并 `LBD` 至 `BD`（可勾选单独定义）。
-  - 左侧 5 列 `Treeview`（`ID` | `文件名` | `次数` | `目标轨` | `L/R`）与右侧 3 列 `Treeview`（`ID` | `文件名` | `L/R`）保持**严格选中互斥**（切 Tab 保留左选并清空右选，点击空白取消选中），支持扩展多选、已分配置灰提示、同名物理文件自动折叠去重、按文件名/片假名/编号序列（`tom1/tom2/tom3`）+ 上下文 `RD` 隔离与立体声声像分流（`LC`/`CY`）自动猜轨（含红字人工复查提醒）、设置可选启用左侧「移除」解除分配、中间栏 **`⇄ L/R`** 单切片/批量独立声道翻转、全局 **`所有切片左右声道互换`**、左/右列表联动单音试听、方向键 **`→` / `←`** 快捷加入/移除与 `Ctrl+Z` / `Ctrl+Y` 撤销重做。
-- **`Auto-LP`（开镲转闭镲自动补足左脚踩镲）**：
-  - 永久保留 `#WAVZY` 与 `#WAVZZ` 槽位。当从开镲（`OHH / 18`）转为闭镲（`CHH / 11`）且间隔 `<=` 设定阈值（支持**乐理音符时值**如 `1/4` 或**物理毫秒 `ms`**），且期间及闭镲同拍位没有原谱 `LP` 时，自动在闭镲位补入 `1B` 音符：默认不勾选 **`使用 ZY`** 时直接复用目标 LP 切片自身槽位（原音量 `100%`）；勾选 `使用 ZY` 后可通过底部播放栏音量框（`0..100%`）写入 `#WAVZY` + `#VOLUMEZY`，并支持点击 `▶` 按设定音量及 `L/R` 状态实时试听；或选择 `ZZ: 空音` 生成 10ms 极短静音 `_silent_zz.wav` 写入 `ZZ`。
-- **高质量离线混音与导出增强**：
-  - 未选入 15-Tab 的全部剩余音符与同轨并发溢出音符，按精确时间轴离线混音导出为高质量 `bgm.ogg`（同拍同 ID 防相位爆音 + 仅向下峰值防削波保护）。
-  - 支持全局 **`左右声道互换 (Swap L/R)`**（仅作为单曲工程状态，启动与打开新谱面默认不勾选）与单切片 **`⇄ L/R`** 异或叠加（`effective_swap = bool(global_swap_lr) ^ bool(item_override)`，同步作用于试听、`bgm.ogg` 单切片解码阶段翻转、`#PREVIEW` 及保留立体声切片，单声道切片直拷零重编码）。
-  - 支持原生 `#GENRE:`、`#PREVIEW` 两级发现、封面/背景图三档适配（原图直拷 / `204x269`+`640x480` 补黑边 / 不搬运）、实验性 BGA 视频/图片透传，以及 `#WAVxx` 行尾 `\t;<LABEL>` 注释自定义。
-  - **内置工程自动存档与双层崩溃日志**：每次导出自动在输出目录生成 `__bms2dtx.json`（含分轨、默认芯片、`Auto-LP`、全局 `Swap L/R` 与单切片 `swapped_wav_ids` 参数），随时可用「载入映射 JSON...」一键还原重导；运行日志与崩溃堆栈持久化于 `%APPDATA%\bms2dtx\crash.log`（可在设置弹窗一键打开日志目录）。
-  - 支持 **简体中文 / English / 日本語** 界面实时热切换，设置持久化保存于 `%APPDATA%\bms2dtx\settings.json`。
+- **原谱只读与宽容解析**：绝不修改源 BMS 目录内任何文件；支持 `CP932` / `UTF-8-BOM` 自动解码（导出可选 `CP932` 或 `UTF-8`）、内存自动修正音频/图片扩展名、对齐 iBMSC/μBMSC 的 `B1..Bn` BGM 列号、`.bml` 长押（`#LNTYPE 1/2`、`#LNOBJ`）与 `.pms` 9 键全 18 轨。
+- **15-Tab 可视化映射与高效交互**：
+  - 覆盖 12 鼓轨（默认隐藏并合并 `LBD` 至 `BD`，可勾选单独定义）与 `Other`（`SE6`）、`Guitar`（`SE11–12`）、`Bass`（`SE13–14`）。
+  - 左侧 5 列（`ID` | `文件名` | `次数` | `目标轨` | `L/R`）与右侧 3 列（`ID` | `文件名` | `L/R`）保持**严格选中互斥**，切换右侧 Tab 时保留左侧选中并清空右侧高亮，点击列表空白区取消选中。
+  - 支持按文件名/片假名/编号序列（`tom1/2/3`）及立体声声像（`LC`/`CY`）自动猜轨（含人工复查提示）、单切片 **`⇄ L/R`** 与全局 **`所有切片左右声道互换`** 异或叠加，以及设置中可选开启「允许从左侧 WAV 列表移除」。
+- **`Auto-LP`（开镲转闭镲自动补左脚踩镲 `1B`）**：
+  - 支持按**音符时值**（默认 `<= 1/4`）或**毫秒（`ms`）**判定；`LP 补足` 下拉支持 `[自动] [ID] 文件名`（优先取默认绑定，回退最高频）、`ZZ: 空音` 或具体切片。
+  - 默认不勾选 **`使用 ZY`**，直接复用目标 LP 切片自身槽位（原音量 `100%`，不额外写入 `#WAVZY:` / `#VOLUMEZY:`）；勾选后可通过底部栏调整 `0–100%` 音量，并支持点击 **`▶`** 按当前音量与生效 `L/R` 状态直接试听。
+- **离线混音与资源导出**：未映射音符及同轨溢出音符自动混音生成 `bgm.ogg`；支持 `#PREVIEW` 两级自动发现、封面/背景图三档处理（原图搬运 / 老版 DTX 等比补黑边 / 不搬运）、实验性 BGA 透传及 `#WAVxx` 行尾 `;LABEL` 自定义。
+- **自动存档、多语言与日志**：每次导出自动生成工程映射 **`__bms2dtx.json`** 便于随时载入微调；支持 **简体中文 / English / 日本語** 实时切换（保存于 `%APPDATA%\bms2dtx\settings.json`），崩溃日志记录于 `%APPDATA%\bms2dtx\crash.log`（可在设置中一键打开）。
 
 ---
 
-## 内置音频引擎与可选 FFmpeg
+## 快速上手
 
-自 **v0.4.0+** 起，`bms2dtx` 内置 **`soundfile` (`libsndfile`) + `soxr` + `sounddevice` (Windows WASAPI Shared → DirectSound → MME，禁用 WDM-KS)**：
-- 常规 `.wav` / `.ogg` / `.flac` / `.mp3` 谱面的单音试听（自动单声道扩双声道并按设备默认采样率预重采样，WASAPI Shared 不独占声卡）、`bgm.ogg` 混合采样率离线混音、`.wav → .ogg` 转码及 `Swap L/R` **完全无需配置 FFmpeg，开箱即用**。
-- 仅在遇到 `.m4a` / `.wma` 等冷门格式，或启用「适配老版 DTX 尺寸（等比缩放 + 补黑边）」图片模式时才需要可选 `ffmpeg.exe`（按可执行文件同级/`bin/` → `PATH` → `⚙ 設定 / Config` 弹窗手动指定 3 级查找）：
+1. **导入谱面**：点击左上角按钮选择，或直接将 `.bms` / `.bme` / `.bml` / `.pms` 文件拖入窗口。
+2. **分轨映射**：在左侧列表挑选切片（或点击「按文件名猜轨」辅助初始填充后手动复查），点击绿色箭头或按 **`→`** 加入当前目标 Tab；鼓轨可在顶部选择默认绑定芯片（`#DTXC_LANEBINDEDCHIP`）。
+3. **配置 `Auto-LP`（可选）**：切至右侧 **`LP`** Tab，选择 `LP 补足` 目标与判定阈值；如需独立调整补足音量，勾选 **`使用 ZY`** 并在底部控制栏设定百分比及点击 **`▶`** 试听。
+4. **导出工程**：指定独立的输出目录，确认编码、`#DLEVEL`、图片处理等选项后点击「开始导出」（生成的 `__bms2dtx.json` 可留作后续回溯载入，对外发布曲包时可按需删除）。
+
+### 常用操作与快捷键
+
+| 操作 / 按键 | 说明 |
+| --- | --- |
+| `↑` / `↓` / `空格` | 切换或试听当前切片（配合「自动试听」勾选实时发声） |
+| `→` / `←` | 加入所选切片 / 从当前选中列表移除（输入框聚焦时不拦截） |
+| 点击列表空白区 | 清除当前列表选中状态 |
+| `Ctrl+Z` / `Ctrl+Y`（`Ctrl+Shift+Z`） | 撤销 / 重做映射修改（输入框聚焦时不拦截） |
+
+---
+
+## 可选 FFmpeg 说明
+
+内置的 `soundfile` + `soxr` + `sounddevice`（WASAPI Shared / DirectSound / MME）已完整支持常见 `.wav` / `.ogg` / `.flac` / `.mp3` 的试听、重采样、`L/R` 翻转与 `bgm.ogg` 混音。  
+仅当需要读取 `.m4a` / `.wma` 等冷门音频，或启用「适配老版 DTX 尺寸（等比缩放 + 补黑边）」图片模式时，才需安装并配置 `ffmpeg.exe`（程序目录 / `bin\` / `PATH` / 设置弹窗）：
 
 ```powershell
 winget install Gyan.FFmpeg.Essentials
@@ -38,46 +48,43 @@ winget install Gyan.FFmpeg.Essentials
 
 ---
 
-## 界面使用简要指南
-
-1. **导入谱面**：点击左上角打开文件，或直接将 `.bms` / `.bme` / `.bml` / `.pms` 文件拖入窗口（支持完整 Unicode 中文/日文路径）。
-2. **分轨映射**：
-   - 在左侧列表选择切片（`Shift`/`Ctrl` 多选，或用「按文件名猜轨」辅助初始填充并在完成后人工逐轨复查），按中间绿色箭头加入右侧当前 Tab；点击左右列表空白处可清除选中，也可在「⚙ 設定 / Config」中启用左侧选中直接点击「移除」解除分配。
-   - 右侧 12 个鼓轨支持选择默认绑定芯片（用于生成 `#DTXC_LANEBINDEDCHIP`，默认自动挑选使用频率最高切片）。
-3. **配置 `Auto-LP`（可选）**：
-   - 切换至右侧 **`LP`** Tab，顶部第 1 行可选择判定阈值模式（`音符时值` / `ms`），第 2 行在 **`LP 补足:`** 选择 `无`、`自动`、`ZZ: 空音` 或具体 LP 切片、勾选 **`使用 ZY`**（可选）与设定阈值（鼠标悬停 1 秒可查看说明）；列表下方提供 **`▶` 试听按钮**、解析目标切片与 **`音量 %`** 调整。
-4. **导出与回溯修改**：
-   - 确认输出目录、编码、`#DLEVEL`、图片处理方式等选项后点击「开始导出」。
-   - 导出后输出目录顶部的 **`__bms2dtx.json`** 会完整记录本次方案；如需微调，直接通过「载入映射 JSON...」（默认已定位到输出目录）一键加载即可。对外发布曲包时可按需删去该工程 JSON 文件。
-
----
-
 ## 从源码运行、测试与打包
 
-### 运行桌面 GUI
+### 安装依赖与启动桌面 GUI
+
 ```powershell
+pip install -r requirements.txt
 python bms2dtx_gui.py
 ```
 
-### 运行命令行转换（CLI）
+### 命令行转换（CLI）
+
 ```powershell
+# 查看谱面解析摘要（JSON）
+python cli.py path\to\chart.bms --inspect
+
+# 执行转换（可选附带映射 JSON 与 .ogg 转码）
 python cli.py path\to\chart.bms --out path\to\output_dtx
-# 携带已保存的映射 JSON：
 python cli.py path\to\chart.bms --out path\to\output_dtx --map-json path\to\__bms2dtx.json --transcode-ogg
 ```
 
 ### 运行单元测试（严格零警告模式）
+
 ```powershell
 python -W error -m unittest discover -s tests -p "test_*.py" -v
 ```
-如希望额外对本地真实谱面目录执行可选的批量只读回归测试，可设置环境变量后运行：
+
+可选本地真谱只读回归测试（需自行指定外部测试目录，未设置时自动跳过）：
+
 ```powershell
-$env:BMS2DTX_REAL_CHARTS_DIR = "D:\Charts\SomeBMSSong"
+$env:BMS2DTX_REAL_CHARTS_DIR = "path\to\local_charts"
 python -W error -m unittest tests/test_real_charts_batch.py -v
 ```
 
 ### 一键打包单文件 `dist\bms2dtx.exe`
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1 -CleanBuildDir
 ```
-打包脚本会自动构建无控制台窗口单文件 `.exe`（若存在 `assets\icon.ico` 则自动嵌入图标），并运行无黑框 `--smoke-test` 验证。
+
+脚本将构建无控制台窗口的单文件可执行程序并自动执行 `--smoke-test` 冒烟验证。
