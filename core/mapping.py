@@ -55,6 +55,7 @@ class MappingPlan:
     wav_volumes: Dict[str, int] = field(default_factory=dict)
     auto_lp_orig_wav_id: Optional[str] = None
     auto_lp_use_silent_zz: bool = False
+    auto_lp_use_zy: bool = False
     auto_lp_placed_count: int = 0
 
 
@@ -523,10 +524,11 @@ def build_mapping_plan(
         if tab is not None:
             dtx_wav_labels[dtx_wid] = tab.value
 
-    # 6. Auto-LP (OHH 18 -> CHH 11 automatic LP 1B pedal insertion) using permanently reserved ZY/ZZ
+    # 6. Auto-LP (OHH 18 -> CHH 11 automatic LP 1B pedal insertion) using permanently reserved ZY/ZZ or direct slot reuse
     wav_volumes: Dict[str, int] = {}
     auto_lp_orig_wav_id: Optional[str] = None
     auto_lp_use_silent_zz = False
+    auto_lp_use_zy = False
     auto_lp_placed_count = 0
 
     auto_lp_cfg = config.auto_lp
@@ -538,6 +540,7 @@ def build_mapping_plan(
         wav_id_map[wid]: wid for wid in ordered_retained_orig_ids
     }
 
+    resolved_lp_orig: Optional[str] = None
     if mode_lower == AUTO_LP_CHIP_EMPTY_ZZ:
         target_lp_dtx_wid = AUTO_LP_SILENT_WAV_ID
         auto_lp_use_silent_zz = True
@@ -548,19 +551,11 @@ def build_mapping_plan(
         if lp_orig is None and normalized_tab_wavs[TabId.LP]:
             lp_orig = resolve_auto_bind_wav_id(chart, normalized_tab_wavs[TabId.LP])
         if lp_orig is not None and lp_orig in wav_id_map:
-            canonical_orig = slot_to_canonical_orig.get(wav_id_map[lp_orig], lp_orig)
-            target_lp_dtx_wid = AUTO_LP_RESONANT_WAV_ID
-            auto_lp_orig_wav_id = canonical_orig
-            wav_volumes[AUTO_LP_RESONANT_WAV_ID] = max(0, min(100, int(auto_lp_cfg.volume)))
-            dtx_wav_labels[AUTO_LP_RESONANT_WAV_ID] = TabId.LP.value
+            resolved_lp_orig = slot_to_canonical_orig.get(wav_id_map[lp_orig], lp_orig)
     elif mode_lower not in ("", AUTO_LP_CHIP_NONE):
         cand_wid = _norm_wav_id(chart, raw_chip_mode)
         if cand_wid in wav_id_map and wav_to_tab.get(cand_wid) == TabId.LP:
-            canonical_orig = slot_to_canonical_orig.get(wav_id_map[cand_wid], cand_wid)
-            target_lp_dtx_wid = AUTO_LP_RESONANT_WAV_ID
-            auto_lp_orig_wav_id = canonical_orig
-            wav_volumes[AUTO_LP_RESONANT_WAV_ID] = max(0, min(100, int(auto_lp_cfg.volume)))
-            dtx_wav_labels[AUTO_LP_RESONANT_WAV_ID] = TabId.LP.value
+            resolved_lp_orig = slot_to_canonical_orig.get(wav_id_map[cand_wid], cand_wid)
         else:
             warnings.append(
                 ConversionWarning(
@@ -571,6 +566,17 @@ def build_mapping_plan(
                     ),
                 )
             )
+
+    if resolved_lp_orig is not None:
+        auto_lp_orig_wav_id = resolved_lp_orig
+        if bool(auto_lp_cfg.use_zy):
+            auto_lp_use_zy = True
+            target_lp_dtx_wid = AUTO_LP_RESONANT_WAV_ID
+            wav_volumes[AUTO_LP_RESONANT_WAV_ID] = max(0, min(100, int(auto_lp_cfg.volume)))
+            dtx_wav_labels[AUTO_LP_RESONANT_WAV_ID] = TabId.LP.value
+        else:
+            auto_lp_use_zy = False
+            target_lp_dtx_wid = wav_id_map[resolved_lp_orig]
 
     if target_lp_dtx_wid is not None:
         ohh_by_tick: Dict[Tuple[int, Fraction], PlacedDtxNote] = {}
@@ -679,5 +685,6 @@ def build_mapping_plan(
         wav_volumes=wav_volumes,
         auto_lp_orig_wav_id=auto_lp_orig_wav_id,
         auto_lp_use_silent_zz=auto_lp_use_silent_zz,
+        auto_lp_use_zy=auto_lp_use_zy,
         auto_lp_placed_count=auto_lp_placed_count,
     )

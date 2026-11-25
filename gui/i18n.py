@@ -65,7 +65,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "stop_btn": "■ 停止",
         "auto_preview_chk": "自动试听",
         "auto_preview_tooltip": "勾选后，单击左/右列表项或按方向键上下移动时会自动试听单个切片",
-        "swap_lr_chk": "左右声道互换",
+        "swap_lr_chk": "所有切片左右声道互换",
         "left_count_summary": "显示 {shown} / {total} · 已分配 {assigned}",
         "tag_missing": "[缺失]",
         "tag_undeclared": "(未声明)",
@@ -82,8 +82,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "auto_lp_label": "LP 补足:",
         "auto_lp_chip_none": "无",
         "auto_lp_chip_auto": "自动",
+        "auto_lp_chip_auto_prefix": "[自动] ",
         "auto_lp_chip_empty_zz": "ZZ: 空音",
         "auto_lp_vol_label": "音量:",
+        "auto_lp_use_zy_chk": "使用 ZY",
+        "auto_lp_use_zy_tooltip": "勾选后使用独立保留槽位 #WAVZY + #VOLUMEZY 控制补足音量；不勾选则直接复用原 LP 切片槽位（100% 原音量）",
+        "auto_lp_play_tooltip": "按当前音量与生效的 L/R 声道状态试听 Auto-LP 目标切片",
+        "auto_lp_target_none": "(未启用 Auto-LP)",
+        "auto_lp_target_zz": "ZZ _silent_zz.wav (空音)",
+        "auto_lp_target_no_slice": "(LP 轨无可用切片)",
         "auto_lp_mode_note": "音符时值",
         "auto_lp_mode_ms": "ms",
         "auto_lp_tooltip": (
@@ -124,6 +131,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "settings_bind_manual": "不自动绑定（手动指定）",
         "settings_labels_section": "#WAVxx 导出行尾 ;LABEL 注释",
         "settings_reset_labels_btn": "恢复默认",
+        "settings_allow_left_remove_chk": "允许在左侧 WAV 列表选中后点击「移除」取消轨道分配",
         "settings_open_logs_btn": "打开日志目录",
         "settings_save_btn": "保存并关闭",
         "settings_cancel_btn": "取消",
@@ -140,6 +148,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_added_skipped_suffix": "（{skipped} 个已分配至其他 Tab，已跳过）",
         "status_select_right_first": "请先在右侧当前 Tab 选择要移除的切片",
         "status_removed_from_tab": "已从 {tab} 移除 {removed} 个切片",
+        "status_unassigned_from_left": "已取消 {removed} 个切片的轨道分配",
         "status_cleared_all": "已清空全部分配",
         "status_guessed": "按文件名猜轨：已填充 {total} 个未分配切片（请检查结果）",
         "status_select_slice_first": "请先选择一个切片",
@@ -182,6 +191,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_guess_confirm_body": (
             "当前已有 {assigned} 个手动分配。\n\n"
             "将仅为 {total} 个【尚未分配】的切片按文件名填充，已有分配不会被覆盖。继续？"
+        ),
+        "dialog_guess_done_title": "自动猜轨完成",
+        "dialog_guess_done_summary": "已按文件名与声像规则自动分配 {total} 个切片。",
+        "dialog_guess_done_warning": (
+            "注意：自动分配仅基于文件名规则与基础声像的非智能检测，存在误判可能，强烈建议人工逐轨筛选并复查一遍。"
         ),
         "dialog_load_map_title": "载入映射",
         "dialog_load_map_first_body": "请先导入谱面。",
@@ -278,7 +292,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "stop_btn": "■ Stop",
         "auto_preview_chk": "Auto-preview",
         "auto_preview_tooltip": "When checked, clicking or moving with Up/Down arrow keys in either list auto-previews the slice",
-        "swap_lr_chk": "Swap L/R",
+        "swap_lr_chk": "Swap L/R for All Slices",
         "left_count_summary": "Showing {shown} / {total} · Assigned {assigned}",
         "tag_missing": "[Missing]",
         "tag_undeclared": "(Undeclared)",
@@ -295,8 +309,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "auto_lp_label": "Auto-LP:",
         "auto_lp_chip_none": "None",
         "auto_lp_chip_auto": "Auto",
+        "auto_lp_chip_auto_prefix": "[Auto] ",
         "auto_lp_chip_empty_zz": "ZZ: Silent",
         "auto_lp_vol_label": "Vol:",
+        "auto_lp_use_zy_chk": "Use ZY",
+        "auto_lp_use_zy_tooltip": "When checked, emits reserved #WAVZY + #VOLUMEZY to apply custom Auto-LP volume; when unchecked, reuses the LP slice's own WAV slot directly",
+        "auto_lp_play_tooltip": "Preview the resolved Auto-LP target slice with current volume and effective L/R swap",
+        "auto_lp_target_none": "(Auto-LP disabled)",
+        "auto_lp_target_zz": "ZZ _silent_zz.wav (Silent)",
+        "auto_lp_target_no_slice": "(No slice in LP lane)",
         "auto_lp_mode_note": "Note Value",
         "auto_lp_mode_ms": "ms",
         "auto_lp_tooltip": (
@@ -338,6 +359,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "settings_bind_manual": "Do not auto-bind (manual)",
         "settings_labels_section": "#WAVxx Export Inline ;LABEL Comments",
         "settings_reset_labels_btn": "Reset Defaults",
+        "settings_allow_left_remove_chk": "Allow removing lane assignments from left WAV list selection",
         "settings_open_logs_btn": "Open Logs",
         "settings_save_btn": "Save & Close",
         "settings_cancel_btn": "Cancel",
@@ -354,6 +376,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_added_skipped_suffix": " ({skipped} already assigned to other Tabs, skipped)",
         "status_select_right_first": "Please select slice(s) in the current Tab first",
         "status_removed_from_tab": "Removed {removed} slice(s) from {tab}",
+        "status_unassigned_from_left": "Unassigned {removed} slice(s) from lanes",
         "status_cleared_all": "Cleared all assignments",
         "status_guessed": "Guessed {total} unassigned slice(s) by filename (please review)",
         "status_select_slice_first": "Please select a slice first",
@@ -396,6 +419,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_guess_confirm_body": (
             "There are currently {assigned} manual assignment(s).\n\n"
             "Only {total} unassigned slice(s) will be filled by filename; existing assignments will not be overwritten. Continue?"
+        ),
+        "dialog_guess_done_title": "Auto-Guess Complete",
+        "dialog_guess_done_summary": "Automatically assigned {total} slice(s) by filename and stereo panning rules.",
+        "dialog_guess_done_warning": (
+            "Note: Auto-assignment relies only on non-AI filename rules and basic stereo panning detection and may misclassify slices. "
+            "Please manually review and verify each lane."
         ),
         "dialog_load_map_title": "Load Mapping",
         "dialog_load_map_first_body": "Please import a chart first.",
@@ -492,7 +521,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "stop_btn": "■ 停止",
         "auto_preview_chk": "自動試聴",
         "auto_preview_tooltip": "有効にすると、左右リストのクリックまたは上下キー移動時に単一スライスを自動試聴します",
-        "swap_lr_chk": "左右チャンネル入替",
+        "swap_lr_chk": "全スライスのL/Rを反転",
         "left_count_summary": "表示 {shown} / {total} · 割当済 {assigned}",
         "tag_missing": "[欠損]",
         "tag_undeclared": "(未定義)",
@@ -509,8 +538,15 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "auto_lp_label": "LP 補足:",
         "auto_lp_chip_none": "なし",
         "auto_lp_chip_auto": "自動",
+        "auto_lp_chip_auto_prefix": "[自動] ",
         "auto_lp_chip_empty_zz": "ZZ: 無音",
         "auto_lp_vol_label": "音量:",
+        "auto_lp_use_zy_chk": "ZY を使用",
+        "auto_lp_use_zy_tooltip": "有効にすると予約スロット #WAVZY + #VOLUMEZY で音量調整します。無効時は元の LP スライスを直接再利用します",
+        "auto_lp_play_tooltip": "現在の音量と有効な L/R 反転設定で Auto-LP 対象スライスを試聴します",
+        "auto_lp_target_none": "(Auto-LP 無効)",
+        "auto_lp_target_zz": "ZZ _silent_zz.wav (無音)",
+        "auto_lp_target_no_slice": "(LP トラックにスライスなし)",
         "auto_lp_mode_note": "音符長",
         "auto_lp_mode_ms": "ms",
         "auto_lp_tooltip": (
@@ -552,6 +588,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "settings_bind_manual": "自動バインドしない（手動指定）",
         "settings_labels_section": "#WAVxx エクスポート行末 ;LABEL コメント",
         "settings_reset_labels_btn": "初期値に戻す",
+        "settings_allow_left_remove_chk": "左側 WAV リストの選択から「削除」で割当解除を許可する",
         "settings_open_logs_btn": "ログフォルダを開く",
         "settings_save_btn": "保存して閉じる",
         "settings_cancel_btn": "キャンセル",
@@ -568,6 +605,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_added_skipped_suffix": "（他 Tab に割当済の {skipped} 個をスキップ）",
         "status_select_right_first": "現在の Tab から削除するスライスを選択してください",
         "status_removed_from_tab": "{tab} から {removed} 個のスライスを削除しました",
+        "status_unassigned_from_left": "{removed} 件のスライスの割当を解除しました",
         "status_cleared_all": "すべての割当をクリアしました",
         "status_guessed": "ファイル名から {total} 個の未割当スライスを自動割当しました",
         "status_select_slice_first": "スライスを選択してください",
@@ -610,6 +648,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "dialog_guess_confirm_body": (
             "現在 {assigned} 個の手動割当があります。\n\n"
             "未割当の {total} 個のみファイル名で自動割当します（既存の割当は上書きされません）。続行しますか？"
+        ),
+        "dialog_guess_done_title": "自動割当完了",
+        "dialog_guess_done_summary": "ファイル名とパンニング規則により {total} 件のスライスを自動割当しました。",
+        "dialog_guess_done_warning": (
+            "注意：自動割当はファイル名規則と簡易パンニング判定のみに基づく非AI検出のため、誤判定の可能性があります。必ず各トラックを手動で確認・見直してください。"
         ),
         "dialog_load_map_title": "マッピング読込",
         "dialog_load_map_first_body": "先に譜面を読み込んでください。",
@@ -703,12 +746,13 @@ def get_default_config_path() -> Path:
 
 
 def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any]:
-    """Load persisted v1.2 settings JSON, filling missing fields with safe defaults."""
+    """Load persisted settings JSON, filling missing fields with safe defaults."""
     settings: Dict[str, Any] = {
         "language": DEFAULT_LANGUAGE,
         "ffmpeg_path": None,
         "default_bind_mode": "auto",
         "swap_lr": False,
+        "allow_left_remove": False,
         "wav_labels": dict(DEFAULT_WAV_LABELS),
     }
     target = Path(config_path) if config_path is not None else get_default_config_path()
@@ -725,6 +769,8 @@ def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any
                 bind_mode = str(data.get("default_bind_mode", "auto")).strip().lower()
                 if bind_mode in ("auto", "manual"):
                     settings["default_bind_mode"] = bind_mode
+                if "allow_left_remove" in data:
+                    settings["allow_left_remove"] = bool(data["allow_left_remove"])
                 raw_labels = data.get("wav_labels")
                 if isinstance(raw_labels, dict):
                     merged = dict(DEFAULT_WAV_LABELS)
@@ -766,6 +812,8 @@ def save_app_settings(
                 existing["wav_labels"] = cleaned_labels
             elif k == "ffmpeg_path":
                 existing["ffmpeg_path"] = str(v).strip() if v else None
+            elif k == "allow_left_remove":
+                existing["allow_left_remove"] = bool(v)
             elif k == "swap_lr":
                 continue
             else:

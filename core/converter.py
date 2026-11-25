@@ -49,9 +49,9 @@ def parse_auto_lp_config(raw: Any) -> AutoLpConfig:
         return AutoLpConfig()
     chip_mode = str(raw.get("chip_mode", AUTO_LP_CHIP_NONE)).strip() or AUTO_LP_CHIP_NONE
     try:
-        volume = max(0, min(100, int(raw.get("volume", 50))))
+        volume = max(0, min(100, int(raw.get("volume", 100))))
     except (TypeError, ValueError):
-        volume = 50
+        volume = 100
     thresh_mode = str(raw.get("threshold_mode", AUTO_LP_THRESHOLD_NOTE)).strip().lower()
     if thresh_mode not in (AUTO_LP_THRESHOLD_NOTE, AUTO_LP_THRESHOLD_MS):
         thresh_mode = AUTO_LP_THRESHOLD_NOTE
@@ -68,6 +68,7 @@ def parse_auto_lp_config(raw: Any) -> AutoLpConfig:
         threshold_ms = max(0.0, float(raw.get("threshold_ms", 250.0)))
     except (TypeError, ValueError):
         threshold_ms = 250.0
+    use_zy = bool(raw.get("use_zy", False))
     return AutoLpConfig(
         chip_mode=chip_mode,
         volume=volume,
@@ -75,6 +76,7 @@ def parse_auto_lp_config(raw: Any) -> AutoLpConfig:
         note_num=note_num,
         note_den=note_den,
         threshold_ms=threshold_ms,
+        use_zy=use_zy,
     )
 
 
@@ -100,7 +102,7 @@ def build_project_mapping_dict(
     )
     alp = config.auto_lp
     data: Dict[str, Any] = {
-        "version": "0.4.2",
+        "version": "0.5.0",
         "tab_wavs": {t.value: list(ids) for t, ids in src_tabs.items() if ids},
         "default_lane_binds": {t.value: w for t, w in src_binds.items() if w},
         "default_bind_mode": config.default_bind_mode,
@@ -115,6 +117,7 @@ def build_project_mapping_dict(
             "note_num": max(1, int(alp.note_num)),
             "note_den": int(alp.note_den) if int(alp.note_den) in AUTO_LP_VALID_DENOMINATORS else 4,
             "threshold_ms": max(0.0, float(alp.threshold_ms)),
+            "use_zy": bool(alp.use_zy),
         },
     }
     return data
@@ -326,7 +329,7 @@ def convert_bms(
         dtx_wav_table.append((dtx_wid, out_name))
         slot_to_out_name[dtx_wid] = out_name
 
-    if plan.auto_lp_orig_wav_id is not None:
+    if plan.auto_lp_use_zy and plan.auto_lp_orig_wav_id is not None:
         zy_out = orig_to_out_name.get(plan.auto_lp_orig_wav_id)
         if zy_out is None:
             mapped_slot = plan.wav_id_map.get(plan.auto_lp_orig_wav_id)

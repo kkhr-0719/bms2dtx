@@ -360,8 +360,14 @@ class PreviewPlayer:
         return self._temp_dir
 
     # --------------------------------------------------------------------- API
-    def play(self, src: Path | str, *, swap_lr: Optional[bool] = None) -> bool:
-        """Start previewing ``src``; returns False if it cannot even be attempted."""
+    def play(
+        self,
+        src: Path | str,
+        *,
+        swap_lr: Optional[bool] = None,
+        gain: float = 1.0,
+    ) -> bool:
+        """Start previewing ``src`` with optional linear ``gain`` (0.0..1.0); returns False if impossible."""
         src_path = Path(src)
         if self._closed:
             return False
@@ -378,11 +384,17 @@ class PreviewPlayer:
         self._purge()
 
         swap_lr = bool(self._swap_lr_getter()) if swap_lr is None else bool(swap_lr)
+        gain_val = max(0.0, min(1.0, float(gain)))
 
         if self._use_legacy_decoder:
             ffmpeg = self._ffmpeg_getter()
             if not ffmpeg:
-                if src_path.suffix.lower() == ".wav" and not swap_lr and self._ws is not None:
+                if (
+                    src_path.suffix.lower() == ".wav"
+                    and not swap_lr
+                    and abs(gain_val - 1.0) < 1e-6
+                    and self._ws is not None
+                ):
                     self._play_file(src_path, gen, direct=True)
                     return True
                 self._status(tr("preview_no_ffmpeg"))
@@ -407,7 +419,7 @@ class PreviewPlayer:
         self._status(tr("preview_decoding", name=src_path.name))
         thread = threading.Thread(
             target=self._decode_and_play_inprocess,
-            args=(src_path, slot, gen, swap_lr),
+            args=(src_path, slot, gen, swap_lr, gain_val),
             name="bms2dtx-preview",
             daemon=True,
         )
@@ -442,11 +454,12 @@ class PreviewPlayer:
             return gen == self._generation and not self._closed
 
     def _decode_and_play_inprocess(
-        self, src: Path, slot: int, gen: int, swap_lr: bool = False
+        self, src: Path, slot: int, gen: int, swap_lr: bool = False, gain: float = 1.0
     ) -> None:
         arr: Any = None
         sr: int = 44100
         sf_exc: Optional[Exception] = None
+        gain_val = max(0.0, min(1.0, float(gain)))
         try:
             arr, sr = _decode_with_soundfile(
                 src, swap_lr=swap_lr, sf_mod=self._sf, np_mod=self._np
@@ -461,7 +474,12 @@ class PreviewPlayer:
         if arr is None:
             ffmpeg = self._ffmpeg_getter()
             if not ffmpeg:
-                if src.suffix.lower() == ".wav" and not swap_lr and self._ws is not None:
+                if (
+                    src.suffix.lower() == ".wav"
+                    and not swap_lr
+                    and abs(gain_val - 1.0) < 1e-6
+                    and self._ws is not None
+                ):
                     self._play_file(src, gen, direct=True)
                     return
                 if sf_exc is not None:
@@ -498,6 +516,9 @@ class PreviewPlayer:
         if not self._is_current(gen):
             return
 
+        if arr is not None and abs(gain_val - 1.0) > 1e-6 and self._np is not None:
+            arr = self._np.ascontiguousarray(arr * self._np.float32(gain_val), dtype=self._np.float32)
+
         if self._sd is not None:
             try:
                 candidates = _get_candidate_output_devices(self._sd)
@@ -525,14 +546,24 @@ class PreviewPlayer:
                 raise RuntimeError(f"All host APIs failed ({'; '.join(errors)})")
             except Exception as exc:
                 # Safe degradation when no audio device exists or PortAudio errors
-                if self._ws is not None and src.suffix.lower() == ".wav" and not swap_lr:
+                if (
+                    self._ws is not None
+                    and src.suffix.lower() == ".wav"
+                    and not swap_lr
+                    and abs(gain_val - 1.0) < 1e-6
+                ):
                     self._play_file(src, gen, direct=True)
                     return
                 if self._is_current(gen):
                     self._status(tr("preview_play_failed", name=src.name, exc=exc))
                 return
 
-        if self._ws is not None and src.suffix.lower() == ".wav" and not swap_lr:
+        if (
+            self._ws is not None
+            and src.suffix.lower() == ".wav"
+            and not swap_lr
+            and abs(gain_val - 1.0) < 1e-6
+        ):
             self._play_file(src, gen, direct=True)
         else:
             self._status(tr("preview_no_winsound"))

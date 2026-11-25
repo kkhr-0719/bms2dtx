@@ -1072,6 +1072,7 @@ class TestMixerAndPipeline(unittest.TestCase):
                     threshold_mode="note_value",
                     note_num=1,
                     note_den=4,
+                    use_zy=True,
                 ),
             )
             res_auto = convert_bms(
@@ -1144,6 +1145,40 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertIn("#VOLUMEZZ: 0", dtx_zz)
             self.assertIn("#0011B: 00ZZ0000", dtx_zz)
             self.assertTrue((out_zz / PROJECT_MAPPING_FILENAME).is_file())
+
+            # 3) Default use_zy=False -> directly reuses target LP slice WAV slot (no #WAVZY: / #VOLUMEZY:)
+            out_reuse = root / "out_reuse"
+            cfg_reuse = MappingConfig(
+                tab_wavs={
+                    TabId.HH_CLOSE: ["01"],
+                    TabId.HH_OPEN: ["02"],
+                    TabId.LP: ["03"],
+                },
+                default_lane_binds={TabId.LP: "03"},
+                auto_lp=AutoLpConfig(
+                    chip_mode=AUTO_LP_CHIP_AUTO,
+                    threshold_mode="note_value",
+                    note_num=1,
+                    note_den=4,
+                ),
+            )
+            self.assertEqual(cfg_reuse.auto_lp.volume, 100)
+            self.assertFalse(cfg_reuse.auto_lp.use_zy)
+            res_reuse = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_reuse, transcode_wav_to_ogg=False, render_bgm=False),
+                mapping=cfg_reuse,
+            )
+            self.assertEqual(res_reuse.auto_lp_placed_count, 1)
+            lp_slot = res_reuse.wav_id_map["03"]
+            dtx_reuse = res_reuse.dtx_path.read_text(encoding="cp932")
+            self.assertNotIn("#WAVZY:", dtx_reuse)
+            self.assertNotIn("#VOLUMEZY:", dtx_reuse)
+            self.assertIn(f"#0011B: 00{lp_slot}0000", dtx_reuse)
+            proj_reuse = json.loads(res_reuse.project_json_path.read_text(encoding="utf-8"))
+            self.assertEqual(proj_reuse["auto_lp"]["volume"], 100)
+            self.assertFalse(proj_reuse["auto_lp"]["use_zy"])
+            self.assertEqual(_load_mapping_json(res_reuse.project_json_path).auto_lp, cfg_reuse.auto_lp)
 
     def test_zero_ffmpeg_mixed_samplerate_swap_lr_transcode_and_bml_ln_silence(self) -> None:
         from unittest import mock

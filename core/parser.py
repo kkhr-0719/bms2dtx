@@ -972,7 +972,7 @@ def parse_bms(path: Path | str) -> BmsChart:
             ConversionWarning(
                 code="UNDEFINED_WAV_REFERENCE",
                 message=(
-                    f"{len(undefined_wav_ids)} note WAV ID(s) have no #WAVxx declaration "
+                    f"Source BMS has {len(undefined_wav_ids)} note WAV ID(s) with no #WAVxx declaration "
                     f"(e.g. {sample})."
                 ),
             )
