@@ -2,7 +2,7 @@
 
 ## 1. 项目目标与版本约定
 - 构建一个轻量级 Windows 桌面工具，将 BMS / BME / BML / PMS 谱面转换为 DTXMania / DTXCreator 可读取的 `.dtx` 文件，并支持通过 PyInstaller 打包为单文件无黑框可执行程序 `dist/bms2dtx.exe`（同时保留可运行的 Python CLI、源码与单元测试）。
-- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.5.0`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
+- 当前版本号规范走 **`0.x.y`**（当前版本 **`0.5.1`**，定义于 `gui/__init__.py` 的 `APP_VERSION`）。
 
 ---
 
@@ -43,7 +43,14 @@
 - **DTX 左侧鼓轨**：
   - `11` HH Close (CHH) | `12` SD | `13` BD | `14` HT | `15` LT | `16` CY | `17` FT | `18` HH Open (OHH) | `19` RD | `1A` LC | `1B` LP | `1C` LBD
 - **DTX BGM / SE 轨**：
-  - `01` BGM（配合 `#BGMWAV: 01`）；`SE1`–`SE32`（`61`–`92`）：`SE6`（`66`）固定归 `Other`，`SE11`–`SE12`（`71`–`72`）优先归 `Guitar`，`SE13`–`SE14`（`73`–`74`）优先归 `Bass`，留空即释放回 Collapse 池。
+  - `01` BGM（配合 `#BGMWAV: 01`）；`SE1`–`SE32`（`61`–`92`）：`SE6`（`66`）固定归 `Other`，**`SE7`（`67`）在 `Toggle = OFF` 模式下解禁 1 条单音专供 Tom 轨（`HT 14`/`LT 15`/`FT 17`）同 tick 溢出（第 3+ 个同拍 Tom 兜底回流 `bgm.ogg`）**，`SE11`–`SE12`（`71`–`72`）优先归 `Guitar`，`SE13`–`SE14`（`73`–`74`）优先归 `Bass`，留空即释放回 Collapse 池。
+- **同拍物理冲突与去重混音合并规则（`v0.5.1`）**：
+  - **Hi-Hat 冲突删音（`HH Open` 优先）**：同 tick 同时存在 `HH Open (18)` 与 `HH Close (11)` 或原谱 `LP (1B)` 时，保留 `18`、**直接删除**碰撞的 `11`/`1B`（绝不回流 `bgm.ogg` 或 SE），且 `Auto-LP` 严格跳过含 `HH Open (18)` 的 tick。
+  - **其余非 Tom 鼓轨碰撞去重混音**：同轨同 tick 完全相同的 `(wav_id, effective_swap)` 直接合并为 1 音；不同切片集合先按各切片 `effective_swap` 翻转后再叠加混音、按规范 `combo_key` 全局缓存复用唯一合成 `#WAVxx`（峰值 `> 0.99` 线性归一化防削波），槽位耗尽才回流 `bgm.ogg`。
+- **导出头部与日志规范**：
+  - 默认省略 `#DLEVEL:` 行（不再填入 BMS `#PLAYLEVEL` 或默认值 `50`，仅显式传 `--dlevel` 时输出）。
+  - 每次导出都在输出根目录生成置顶 UTF-8 转换日志 **`__bms2dtx_log.txt`**（与 `__bms2dtx.json` 同级），按小节顺序记录所有删音、Tom 分流、去重混音防削波及导入/导出期警告。
+  - GUI 顶部健康面板在 `查看警告 (N)` 上方用红字展示导入期警告摘要标签；导出完成弹窗仅列出导出期新发警告，不再复写导入期警告。
 - **DTXC 绑定芯片**：
   - `#DTXC_LANEBINDEDCHIP: <lane> <main_wav> <sub_wav>`（`01`=LC、`02`=HHC/HHO、`03`=LP/LBD、`04`=SD、`05`=HT、`06`=BD、`07`=LT、`08`=FT、`09`=CY/RD）。`separate_lbd=False` 且 `LBD` 未独立绑定时，`BD` 默认芯片自动同步填入 `03` 轨副槽。
 - **`Auto-LP`（OHH `18` → CHH `11` 自动补足 LP `1B` 状态机）**：

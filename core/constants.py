@@ -27,6 +27,7 @@ AUTO_LP_THRESHOLD_MS = "ms"
 AUTO_LP_VALID_DENOMINATORS: Tuple[int, ...] = (2, 4, 6, 8, 12, 16)
 
 PROJECT_MAPPING_FILENAME = "__bms2dtx.json"
+CONVERSION_LOG_FILENAME = "__bms2dtx_log.txt"
 
 DTX_MAX_BASE36_ID = 1295  # 00..ZZ
 DTX_MAX_WAV_SLOTS = 1293  # 01..ZX (ZY & ZZ permanently reserved for Auto-LP)
@@ -139,6 +140,7 @@ TAB_SPECS: Tuple[TabSpec, ...] = (
 TAB_SPEC_MAP: Dict[TabId, TabSpec] = {spec.tab_id: spec for spec in TAB_SPECS}
 TAB_ORDER: Tuple[TabId, ...] = tuple(spec.tab_id for spec in TAB_SPECS)
 DRUM_TABS: Tuple[TabId, ...] = tuple(spec.tab_id for spec in TAB_SPECS if spec.is_drum)
+TOM_TABS: frozenset[TabId] = frozenset({TabId.HT, TabId.LT, TabId.FT})
 
 # DTXCreator #DTXC_LANEBINDEDCHIP lane -> (main_tab, sub_tab)
 DTXC_BIND_LANES: Tuple[Tuple[str, TabId, Optional[TabId]], ...] = (
@@ -163,6 +165,7 @@ ALL_SE_CHANNELS: Tuple[str, ...] = (
 
 SLICER_SE_CHANNELS: Tuple[str, ...] = ("61", "62", "63", "64", "65")  # SE1..SE5
 OTHER_SE_CHANNEL = "66"  # SE6
+TOM_OVERFLOW_SE_CHANNEL = "67"  # SE7 (dedicated 1-voice overflow lane for HT/LT/FT in Toggle=OFF)
 GUITAR_SE_CHANNELS: Tuple[str, ...] = ("71", "72")  # SE11..SE12
 BASS_SE_CHANNELS: Tuple[str, ...] = ("73", "74")  # SE13..SE14
 

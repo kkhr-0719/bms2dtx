@@ -24,10 +24,22 @@ from .constants import (
     MAX_SLICER_COLUMNS,
     TAB_ORDER,
     TAB_SPEC_MAP,
+    TOM_OVERFLOW_SE_CHANNEL,
+    TOM_TABS,
     TabId,
     int_to_base36,
 )
-from .models import BmsChart, ConversionWarning, MappingConfig, NoteEvent, PlacedDtxNote
+from .models import (
+    BmsChart,
+    ConversionWarning,
+    HiHatConflictRemoval,
+    MappingConfig,
+    MergedSliceOccurrence,
+    MergedSliceSpec,
+    NoteEvent,
+    PlacedDtxNote,
+    TomOverflowRecord,
+)
 
 
 class WavLimitExceededError(ValueError):
@@ -57,6 +69,9 @@ class MappingPlan:
     auto_lp_use_silent_zz: bool = False
     auto_lp_use_zy: bool = False
     auto_lp_placed_count: int = 0
+    hihat_conflict_removals: List[HiHatConflictRemoval] = field(default_factory=list)
+    tom_overflow_records: List[TomOverflowRecord] = field(default_factory=list)
+    merged_slices: List[MergedSliceSpec] = field(default_factory=list)
 
 
 def resolve_auto_bind_wav_id(
@@ -120,11 +135,39 @@ def _resolve_tab_key(raw_key: TabId | str) -> TabId:
     return TabId(key_up)
 
 
+def _resolve_swapped_wav_set(
+    chart: BmsChart, swapped_wav_ids: Sequence[str]
+) -> Set[str]:
+    """Normalize per-slice L/R overrides and propagate across shared physical files."""
+    if not swapped_wav_ids:
+        return set()
+    norm_ids: Set[str] = set()
+    for raw_wid in swapped_wav_ids:
+        wid = _norm_wav_id(chart, str(raw_wid))
+        if wid:
+            norm_ids.add(wid)
+    if not norm_ids:
+        return set()
+    swapped_paths: Set[str] = set()
+    for wid in list(norm_ids):
+        entry = chart.wavs.get(wid)
+        if entry is not None and entry.exists and entry.resolved_path is not None:
+            swapped_paths.add(os.path.normcase(os.path.abspath(str(entry.resolved_path))))
+    if swapped_paths:
+        for wid, entry in chart.wavs.items():
+            if entry.exists and entry.resolved_path is not None:
+                phys = os.path.normcase(os.path.abspath(str(entry.resolved_path)))
+                if phys in swapped_paths:
+                    norm_ids.add(wid)
+    return norm_ids
+
+
 def build_mapping_plan(
     chart: BmsChart,
     config: MappingConfig,
     *,
     auto_merge_duplicates: Optional[bool] = None,
+    global_swap_lr: bool = False,
 ) -> MappingPlan:
     """Validate 15-Tab mapping, enforce Rule 5 Toggle-OFF lock, renumber WAVs, and place Tab notes."""
     warnings: List[ConversionWarning] = []
@@ -411,12 +454,88 @@ def build_mapping_plan(
         if main_chip != "00" or sub_chip != "00":
             lane_bind_lines.append(f"#DTXC_LANEBINDEDCHIP: {lane_code} {main_chip} {sub_chip}")
 
-    # 5. Place Tab 1..15 notes onto their DTX channels (never silently drop simultaneous collisions)
+    guitar_enabled = len(normalized_tab_wavs[TabId.GUITAR]) > 0
+    bass_enabled = len(normalized_tab_wavs[TabId.BASS]) > 0
+
+    dtx_wav_labels: Dict[str, str] = {}
+    if not effective_toggle_on:
+        dtx_wav_labels["01"] = "BGM"
+    for orig_wid in ordered_retained_orig_ids:
+        dtx_wid = wav_id_map[orig_wid]
+        tab = wav_to_tab.get(orig_wid)
+        if tab is not None:
+            dtx_wav_labels[dtx_wid] = tab.value
+
+    slot_to_canonical_orig: Dict[str, str] = {
+        wav_id_map[wid]: wid for wid in ordered_retained_orig_ids
+    }
+    swapped_set = _resolve_swapped_wav_set(chart, config.swapped_wav_ids)
+
+    # 5a. Cross-lane Hi-Hat physical conflict guard: HH Open (18) owns the tick and removes
+    # simultaneous HH Close (11) or source LP (1B) notes cleanly (NEVER reflow to bgm.ogg / SE).
+    hihat_conflict_removals: List[HiHatConflictRemoval] = []
+    hh_open_ticks: Set[Tuple[int, Fraction]] = {
+        (ev.measure, ev.pos) for ev in mapped_events_by_tab[TabId.HH_OPEN]
+    }
+    if hh_open_ticks:
+        for conflict_tab in (TabId.HH_CLOSE, TabId.LP):
+            events_list = mapped_events_by_tab[conflict_tab]
+            if not events_list:
+                continue
+            ch_code = TAB_SPEC_MAP[conflict_tab].dtx_channels[0]
+            kept_events: List[NoteEvent] = []
+            seen_removal_keys: Set[Tuple[int, Fraction, TabId, str]] = set()
+            for ev in events_list:
+                tick = (ev.measure, ev.pos)
+                if tick in hh_open_ticks:
+                    rkey = (ev.measure, ev.pos, conflict_tab, ev.wav_id)
+                    if rkey not in seen_removal_keys:
+                        seen_removal_keys.add(rkey)
+                        entry = chart.wavs.get(ev.wav_id)
+                        fname = entry.resolved_name if entry is not None else "(undeclared)"
+                        hihat_conflict_removals.append(
+                            HiHatConflictRemoval(
+                                measure=ev.measure,
+                                pos=ev.pos,
+                                tab=conflict_tab,
+                                channel=ch_code,
+                                wav_id=ev.wav_id,
+                                filename=fname,
+                            )
+                        )
+                    continue
+                kept_events.append(ev)
+            mapped_events_by_tab[conflict_tab] = kept_events
+
+        hihat_conflict_removals.sort(
+            key=lambda r: (r.measure, r.pos, TAB_ORDER.index(r.tab), r.wav_id)
+        )
+        for rec in hihat_conflict_removals:
+            warnings.append(
+                ConversionWarning(
+                    code="HIHAT_OPEN_CONFLICT_REMOVED",
+                    message=(
+                        f"M{rec.measure:03d} pos {rec.pos}: removed {rec.tab.value}({rec.channel}) "
+                        f"#WAV{rec.wav_id} ({rec.filename}) due to simultaneous HH Open (18)."
+                    ),
+                )
+            )
+
+    # 5b. Place Tab 1..15 notes onto their DTX channels
     tab_placed_notes: List[PlacedDtxNote] = []
     tab_collision_events: List[NoteEvent] = []
     collision_details: List[str] = []
+    tom_overflow_records: List[TomOverflowRecord] = []
+    merged_slices: List[MergedSliceSpec] = []
+    merged_combo_cache: Dict[Tuple[Tuple[str, bool], ...], MergedSliceSpec] = {}
+    tom_overflow_by_tick: Dict[
+        Tuple[int, Fraction], List[Tuple[int, Tuple[int, int, int], TabId, NoteEvent]]
+    ] = defaultdict(list)
 
-    for tab in TAB_ORDER:
+    next_free_slot = start_slot + len(ordered_retained_orig_ids)
+    slot_exhausted_count = 0
+
+    for tab_idx, tab in enumerate(TAB_ORDER):
         spec = TAB_SPEC_MAP[tab]
         tab_events = mapped_events_by_tab[tab]
         if not tab_events:
@@ -444,15 +563,185 @@ def build_mapping_plan(
 
         for slot_key in sorted(grouped.keys()):
             slot_events = grouped[slot_key]
-            # Deduplicate identical DTX WAV slots (including merged duplicate physical files) at the same tick
-            best_by_wav: Dict[str, NoteEvent] = {}
+            # Deduplicate identical (DTX WAV slot, effective_swap) at the same tick
+            best_by_key: Dict[Tuple[str, bool], NoteEvent] = {}
             for ev in slot_events:
-                dedup_key = wav_id_map.get(ev.wav_id, ev.wav_id)
-                prev = best_by_wav.get(dedup_key)
+                dtx_wid = wav_id_map.get(ev.wav_id, ev.wav_id)
+                eff_swap = bool(global_swap_lr) ^ (ev.wav_id in swapped_set)
+                dedup_key = (dtx_wid, eff_swap)
+                prev = best_by_key.get(dedup_key)
                 if prev is None or _prio(ev) < _prio(prev):
-                    best_by_wav[dedup_key] = ev
+                    best_by_key[dedup_key] = ev
 
-            ranked = sorted(best_by_wav.values(), key=_prio)
+            ranked = sorted(best_by_key.values(), key=_prio)
+
+            # Toggle=OFF: Tom lanes route 1 overflow to SE7 (67); remaining drum lanes merge distinct slices
+            if not effective_toggle_on and spec.is_drum:
+                if len(ranked) == 1:
+                    ev = ranked[0]
+                    tab_placed_notes.append(
+                        PlacedDtxNote(
+                            measure=ev.measure,
+                            pos=ev.pos,
+                            channel=channels[0],
+                            dtx_wav_id=wav_id_map[ev.wav_id],
+                            original_wav_id=ev.wav_id,
+                            time_sec=ev.time_sec,
+                        )
+                    )
+                    continue
+
+                if tab in TOM_TABS:
+                    winner = ranked[0]
+                    tab_placed_notes.append(
+                        PlacedDtxNote(
+                            measure=winner.measure,
+                            pos=winner.pos,
+                            channel=channels[0],
+                            dtx_wav_id=wav_id_map[winner.wav_id],
+                            original_wav_id=winner.wav_id,
+                            time_sec=winner.time_sec,
+                        )
+                    )
+                    for extra_ev in ranked[1:]:
+                        tom_overflow_by_tick[slot_key].append(
+                            (tab_idx, _prio(extra_ev), tab, extra_ev)
+                        )
+                    continue
+
+                # Non-Tom drum lane: strictly deduplicated offline mix-merge of distinct components
+                existing_items: List[Tuple[str, bool, str, NoteEvent]] = []
+                missing_items: List[NoteEvent] = []
+                for ev in ranked:
+                    dtx_wid = wav_id_map[ev.wav_id]
+                    canon_orig = slot_to_canonical_orig.get(dtx_wid, ev.wav_id)
+                    eff_swap = bool(global_swap_lr) ^ (ev.wav_id in swapped_set)
+                    entry = chart.wavs.get(canon_orig) or chart.wavs.get(ev.wav_id)
+                    if entry is not None and entry.exists and entry.resolved_path is not None:
+                        existing_items.append((canon_orig, eff_swap, entry.resolved_name, ev))
+                    else:
+                        missing_items.append(ev)
+
+                if len(existing_items) == 1:
+                    canon_orig, _eff_swap, _fname, winner = existing_items[0]
+                    tab_placed_notes.append(
+                        PlacedDtxNote(
+                            measure=winner.measure,
+                            pos=winner.pos,
+                            channel=channels[0],
+                            dtx_wav_id=wav_id_map[winner.wav_id],
+                            original_wav_id=canon_orig,
+                            time_sec=winner.time_sec,
+                        )
+                    )
+                    if missing_items:
+                        missing_sample = ", ".join(f"#WAV{m.wav_id}" for m in missing_items[:4])
+                        warnings.append(
+                            ConversionWarning(
+                                code="MERGED_SLICE_MISSING_COMPONENT_SKIPPED",
+                                message=(
+                                    f"M{winner.measure:03d} pos {winner.pos}: skipped missing "
+                                    f"simultaneous slice(s) ({missing_sample}) on {tab.value}({channels[0]})."
+                                ),
+                            )
+                        )
+                    continue
+
+                if len(existing_items) >= 2:
+                    existing_items.sort(key=lambda item: (item[0], item[1]))
+                    combo_key: Tuple[Tuple[str, bool], ...] = tuple(
+                        (item[0], item[1]) for item in existing_items
+                    )
+                    spec_obj = merged_combo_cache.get(combo_key)
+                    if spec_obj is None:
+                        if next_free_slot <= DTX_MAX_WAV_SLOTS:
+                            merged_dtx_wid = int_to_base36(next_free_slot)
+                            next_free_slot += 1
+                            components = tuple(
+                                (item[0], item[1], item[2]) for item in existing_items
+                            )
+                            spec_obj = MergedSliceSpec(
+                                combo_key=combo_key,
+                                dtx_wav_id=merged_dtx_wid,
+                                first_tab=tab,
+                                components=components,
+                            )
+                            merged_combo_cache[combo_key] = spec_obj
+                            merged_slices.append(spec_obj)
+                            dtx_wav_labels[merged_dtx_wid] = f"{tab.value}_MIX"
+                    if spec_obj is not None:
+                        spec_obj.occurrences.append(
+                            MergedSliceOccurrence(
+                                measure=slot_key[0],
+                                pos=slot_key[1],
+                                tab=tab,
+                                channel=channels[0],
+                            )
+                        )
+                        ref_ev = existing_items[0][3]
+                        tab_placed_notes.append(
+                            PlacedDtxNote(
+                                measure=slot_key[0],
+                                pos=slot_key[1],
+                                channel=channels[0],
+                                dtx_wav_id=spec_obj.dtx_wav_id,
+                                original_wav_id=spec_obj.dtx_wav_id,
+                                time_sec=ref_ev.time_sec,
+                            )
+                        )
+                        if missing_items:
+                            missing_sample = ", ".join(f"#WAV{m.wav_id}" for m in missing_items[:4])
+                            warnings.append(
+                                ConversionWarning(
+                                    code="MERGED_SLICE_MISSING_COMPONENT_SKIPPED",
+                                    message=(
+                                        f"M{slot_key[0]:03d} pos {slot_key[1]}: skipped missing "
+                                        f"simultaneous slice(s) ({missing_sample}) while merging on {tab.value}({channels[0]})."
+                                    ),
+                                )
+                            )
+                        continue
+                    else:
+                        # Capacity 01..ZX exhausted -> fallback winner + reflow extras to bgm.ogg
+                        slot_exhausted_count += 1
+                        winner = ranked[0]
+                        tab_placed_notes.append(
+                            PlacedDtxNote(
+                                measure=winner.measure,
+                                pos=winner.pos,
+                                channel=channels[0],
+                                dtx_wav_id=wav_id_map[winner.wav_id],
+                                original_wav_id=winner.wav_id,
+                                time_sec=winner.time_sec,
+                            )
+                        )
+                        for extra_ev in ranked[1:]:
+                            tab_collision_events.append(extra_ev)
+                            collision_details.append(
+                                f"M{extra_ev.measure:03d} {tab.value}({channels[0]}) #WAV{extra_ev.wav_id}"
+                            )
+                        continue
+
+                # All colliding slices are missing audio files -> keep winner on lane, reflow rest
+                winner = ranked[0]
+                tab_placed_notes.append(
+                    PlacedDtxNote(
+                        measure=winner.measure,
+                        pos=winner.pos,
+                        channel=channels[0],
+                        dtx_wav_id=wav_id_map[winner.wav_id],
+                        original_wav_id=winner.wav_id,
+                        time_sec=winner.time_sec,
+                    )
+                )
+                for extra_ev in ranked[1:]:
+                    tab_collision_events.append(extra_ev)
+                    collision_details.append(
+                        f"M{extra_ev.measure:03d} {tab.value}({channels[0]}) #WAV{extra_ev.wav_id}"
+                    )
+                continue
+
+            # Standard placement (Other/Guitar/Bass SE polyphony, or Toggle=ON tabs)
             winners = ranked[:cap]
             displaced = ranked[cap:]
 
@@ -489,6 +778,77 @@ def build_mapping_plan(
                     f"M{ev.measure:03d} {tab.value}({'/'.join(channels)}) #WAV{ev.wav_id}"
                 )
 
+    # 5c. Resolve Tom overflow queue for Toggle=OFF: strictly 1 note/tick to SE7 (67); extras -> bgm.ogg
+    if tom_overflow_by_tick:
+        for slot_key in sorted(tom_overflow_by_tick.keys()):
+            items = sorted(tom_overflow_by_tick[slot_key], key=lambda item: (item[0], item[1]))
+            first_tab_idx, _first_prio, first_tab, first_ev = items[0]
+            _ = first_tab_idx
+            first_ch = TAB_SPEC_MAP[first_tab].dtx_channels[0]
+            first_entry = chart.wavs.get(first_ev.wav_id)
+            first_fname = first_entry.resolved_name if first_entry is not None else "(undeclared)"
+            tab_placed_notes.append(
+                PlacedDtxNote(
+                    measure=first_ev.measure,
+                    pos=first_ev.pos,
+                    channel=TOM_OVERFLOW_SE_CHANNEL,
+                    dtx_wav_id=wav_id_map[first_ev.wav_id],
+                    original_wav_id=first_ev.wav_id,
+                    time_sec=first_ev.time_sec,
+                )
+            )
+            tom_overflow_records.append(
+                TomOverflowRecord(
+                    measure=first_ev.measure,
+                    pos=first_ev.pos,
+                    source_tab=first_tab,
+                    source_channel=first_ch,
+                    wav_id=first_ev.wav_id,
+                    filename=first_fname,
+                    target_channel=TOM_OVERFLOW_SE_CHANNEL,
+                )
+            )
+            for _ex_idx, _ex_prio, ex_tab, ex_ev in items[1:]:
+                ex_ch = TAB_SPEC_MAP[ex_tab].dtx_channels[0]
+                ex_entry = chart.wavs.get(ex_ev.wav_id)
+                ex_fname = ex_entry.resolved_name if ex_entry is not None else "(undeclared)"
+                unmapped_events.append(ex_ev)
+                tom_overflow_records.append(
+                    TomOverflowRecord(
+                        measure=ex_ev.measure,
+                        pos=ex_ev.pos,
+                        source_tab=ex_tab,
+                        source_channel=ex_ch,
+                        wav_id=ex_ev.wav_id,
+                        filename=ex_fname,
+                        target_channel="BGM",
+                    )
+                )
+                warnings.append(
+                    ConversionWarning(
+                        code="TOM_OVERFLOW_BGM_REFLOW",
+                        message=(
+                            f"M{ex_ev.measure:03d} pos {ex_ev.pos}: {ex_tab.value}({ex_ch}) "
+                            f"#WAV{ex_ev.wav_id} ({ex_fname}) exceeded SE7 (67) single-note cap "
+                            f"and reflowed into bgm.ogg."
+                        ),
+                    )
+                )
+        unmapped_events.sort(key=lambda e: (e.measure, e.pos, e.order_index))
+
+    if slot_exhausted_count > 0:
+        warnings.append(
+            ConversionWarning(
+                code="MERGED_SLICE_SLOT_EXHAUSTED",
+                message=(
+                    f"DTX Base-36 capacity ({DTX_MAX_WAV_SLOTS}, 01..ZX) reached while allocating "
+                    f"merged drum slices; {slot_exhausted_count} collision slot(s) fell back to bgm.ogg."
+                ),
+            )
+        )
+
+    tab_placed_notes.sort(key=lambda n: (n.measure, n.pos, n.channel))
+
     if tab_collision_events:
         if not effective_toggle_on:
             unmapped_events.extend(tab_collision_events)
@@ -512,18 +872,6 @@ def build_mapping_plan(
             )
         )
 
-    guitar_enabled = len(normalized_tab_wavs[TabId.GUITAR]) > 0
-    bass_enabled = len(normalized_tab_wavs[TabId.BASS]) > 0
-
-    dtx_wav_labels: Dict[str, str] = {}
-    if not effective_toggle_on:
-        dtx_wav_labels["01"] = "BGM"
-    for orig_wid in ordered_retained_orig_ids:
-        dtx_wid = wav_id_map[orig_wid]
-        tab = wav_to_tab.get(orig_wid)
-        if tab is not None:
-            dtx_wav_labels[dtx_wid] = tab.value
-
     # 6. Auto-LP (OHH 18 -> CHH 11 automatic LP 1B pedal insertion) using permanently reserved ZY/ZZ or direct slot reuse
     wav_volumes: Dict[str, int] = {}
     auto_lp_orig_wav_id: Optional[str] = None
@@ -535,10 +883,6 @@ def build_mapping_plan(
     raw_chip_mode = str(auto_lp_cfg.chip_mode or AUTO_LP_CHIP_NONE).strip()
     mode_lower = raw_chip_mode.lower()
     target_lp_dtx_wid: Optional[str] = None
-
-    slot_to_canonical_orig: Dict[str, str] = {
-        wav_id_map[wid]: wid for wid in ordered_retained_orig_ids
-    }
 
     resolved_lp_orig: Optional[str] = None
     if mode_lower == AUTO_LP_CHIP_EMPTY_ZZ:
@@ -630,8 +974,8 @@ def build_mapping_plan(
                     chh = chh_by_tick[tick]
                     # Rule 1: Only first CHH after OHH consumes the pending open state
                     pending_ohh = None
-                    # Rule 2: Skip if any original LP appeared since OHH or exists on this CHH tick
-                    if not lp_seen_since_ohh and not has_lp_at_tick:
+                    # Rule 2: Skip if any original LP appeared since OHH or exists on this CHH/OHH tick
+                    if not lp_seen_since_ohh and not has_lp_at_tick and tick not in ohh_by_tick:
                         if thresh_mode == AUTO_LP_THRESHOLD_MS:
                             dt_ms = (chh.time_sec - ohh.time_sec) * 1000.0
                             within_threshold = 0.0 < dt_ms <= (max_ms_diff + 1e-6)
@@ -687,4 +1031,7 @@ def build_mapping_plan(
         auto_lp_use_silent_zz=auto_lp_use_silent_zz,
         auto_lp_use_zy=auto_lp_use_zy,
         auto_lp_placed_count=auto_lp_placed_count,
+        hihat_conflict_removals=hihat_conflict_removals,
+        tom_overflow_records=tom_overflow_records,
+        merged_slices=merged_slices,
     )

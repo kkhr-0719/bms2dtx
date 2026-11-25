@@ -209,13 +209,6 @@ def generate_dtx_text(
     else:
         final_comment = "via bms2dtx"
 
-    if dlevel is not None:
-        final_dlevel = max(1, min(999, int(dlevel)))
-    elif chart.playlevel is not None:
-        final_dlevel = max(1, min(999, int(chart.playlevel)))
-    else:
-        final_dlevel = 50
-
     lines: List[str] = [
         "; Created by bms2dtx",
         "",
@@ -228,9 +221,11 @@ def generate_dtx_text(
         [
             f"#COMMENT: {final_comment}",
             f"#BPM: {format_dtx_number(chart.initial_bpm)}",
-            f"#DLEVEL: {final_dlevel}",
         ]
     )
+    if dlevel is not None:
+        final_dlevel = max(1, min(999, int(dlevel)))
+        lines.append(f"#DLEVEL: {final_dlevel}")
     if preview_filename:
         dtx_preview = preview_filename.replace("/", "\\").replace(";", "_")
         lines.append(f"#PREVIEW: {dtx_preview}")
@@ -256,9 +251,15 @@ def generate_dtx_text(
         raw_label = ""
         if dtx_wav_labels is not None and wid in dtx_wav_labels:
             label_key_or_val = dtx_wav_labels[wid]
-            raw_label = merged_label_table.get(
-                str(label_key_or_val).strip().upper(), label_key_or_val
-            )
+            upper_val = str(label_key_or_val).strip().upper()
+            if upper_val in merged_label_table:
+                raw_label = merged_label_table[upper_val]
+            elif upper_val.endswith("_MIX"):
+                base_key = upper_val[:-4]
+                base_lbl = merged_label_table.get(base_key, base_key)
+                raw_label = f"{base_lbl}_MIX" if base_lbl else ""
+            else:
+                raw_label = label_key_or_val
         elif not effective_toggle_on and wid == "01":
             raw_label = merged_label_table.get("BGM", DEFAULT_WAV_LABELS["BGM"])
         clean_label = sanitize_wav_label(raw_label) if raw_label else ""

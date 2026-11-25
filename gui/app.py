@@ -1,4 +1,4 @@
-"""bms2dtx desktop GUI (tkinter / ttk). v0.3.0: Toggle = OFF only."""
+"""bms2dtx desktop GUI (tkinter / ttk). v0.5.1: Toggle = OFF only."""
 
 from __future__ import annotations
 
@@ -51,7 +51,6 @@ from .helpers import (
     build_health_summary,
     build_result_summary,
     check_output_dir,
-    default_dlevel_text,
     filter_wav_ids,
     format_tab_tree_values,
     format_warnings,
@@ -59,12 +58,12 @@ from .helpers import (
     get_no_bind_label,
     get_tab_note,
     load_mapping_json,
-    parse_dlevel,
     radix_needs_notice,
     resolve_auto_lp_target_wav_id,
     save_mapping_json,
     suggest_load_mapping_location,
     suggest_output_dir,
+    summarize_import_warning_tags,
     tab_has_bind_combobox,
     tab_label,
     tab_title,
@@ -1102,12 +1101,22 @@ class App:
         self.health.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
         self.health.columnconfigure(1, weight=1)
         self._health_widgets: List[tk.Widget] = []
+        self.warn_box = ttk.Frame(self.health)
+        self.warn_summary_label = tk.Label(
+            self.warn_box,
+            text="",
+            fg=ERROR_RED,
+            font=self.bold_font,
+            wraplength=360,
+            justify="right",
+        )
         self.warn_btn = ttk.Button(
-            self.health,
+            self.warn_box,
             text=tr("view_warnings_btn", count=0),
             command=self.show_chart_warnings,
             state="disabled",
         )
+        self.warn_btn.grid(row=1, column=0, sticky="e")
         self._render_health(None)
 
         # --- main workspace ---
@@ -1362,10 +1371,6 @@ class App:
         self.ogg_var = tk.BooleanVar(value=False)
         self.ogg_chk = ttk.Checkbutton(opts1, text=tr("transcode_ogg_chk"), variable=self.ogg_var)
         self.ogg_chk.pack(side="left", padx=12)
-        self.dlevel_label = ttk.Label(opts1, text=tr("dlevel_label"))
-        self.dlevel_label.pack(side="left", padx=(12, 2))
-        self.dlevel_var = tk.StringVar(value="50")
-        ttk.Entry(opts1, textvariable=self.dlevel_var, width=6).pack(side="left")
 
         opts2 = ttk.Frame(self.export_frame)
         opts2.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
@@ -1479,7 +1484,6 @@ class App:
         self.open_out_btn.configure(text=tr("open_output_btn"))
         self.utf8_chk.configure(text=tr("utf8_chk"))
         self.ogg_chk.configure(text=tr("transcode_ogg_chk"))
-        self.dlevel_label.configure(text=tr("dlevel_label"))
         self.image_mode_label.configure(text=tr("image_mode_label"))
         self._refresh_image_mode_combo()
         self.export_bga_chk.configure(text=tr("export_bga_chk"))
@@ -2037,7 +2041,6 @@ class App:
         self.path_var.set(str(chart.source_path))
         self._render_health(chart)
         self.out_var.set(str(suggest_output_dir(chart.source_path)))
-        self.dlevel_var.set(default_dlevel_text(chart))
         self.search_var.set("")
         self.refresh_all()
         self.export_btn.configure(state="normal")
@@ -2049,8 +2052,11 @@ class App:
         for w in self._health_widgets:
             w.destroy()
         self._health_widgets.clear()
-        self.warn_btn.grid_forget()
+        self.warn_box.grid_forget()
         if chart is None:
+            self.warn_summary_label.configure(text="")
+            self.warn_summary_label.grid_forget()
+            self.warn_btn.configure(text=tr("view_warnings_btn", count=0), state="disabled")
             lbl = ttk.Label(self.health, text=tr("health_placeholder"))
             lbl.grid(row=0, column=0, columnspan=4, sticky="w")
             self._health_widgets.append(lbl)
@@ -2072,10 +2078,18 @@ class App:
             val.grid(row=r, column=col_block + 1, sticky="nw", padx=(0, 18))
             self._health_widgets.extend([title, val])
         self.health.columnconfigure(3, weight=1)
+        warn_summary = summarize_import_warning_tags(chart.warnings)
+        if warn_summary:
+            self.warn_summary_label.configure(text=warn_summary)
+            self.warn_summary_label.grid(row=0, column=0, sticky="e", pady=(0, 2))
+        else:
+            self.warn_summary_label.configure(text="")
+            self.warn_summary_label.grid_forget()
         self.warn_btn.configure(
             text=tr("view_warnings_btn", count=len(chart.warnings)), state="normal"
         )
-        self.warn_btn.grid(row=3, column=2, columnspan=2, sticky="e")
+        self.warn_btn.grid(row=1, column=0, sticky="e")
+        self.warn_box.grid(row=3, column=2, columnspan=2, sticky="se")
 
     def show_chart_warnings(self) -> None:
         if self.chart is not None:
@@ -2677,15 +2691,6 @@ class App:
                 tr("dialog_invalid_out_title"), err, parent=self.root
             )
             return
-        try:
-            dlevel = parse_dlevel(self.dlevel_var.get())
-        except ValueError:
-            messagebox.showerror(
-                tr("dialog_dlevel_err_title"),
-                tr("dialog_dlevel_err_body"),
-                parent=self.root,
-            )
-            return
 
         render_bgm = True
         if self.selected_image_mode() == IMAGE_MODE_RESIZE and self.ffmpeg_path is None:
@@ -2706,7 +2711,7 @@ class App:
             output_dir=out_dir,
             utf8=self.utf8_var.get(),
             transcode_wav_to_ogg=bool(self.ogg_var.get()),
-            dlevel=dlevel,
+            dlevel=None,
             ffmpeg_path=self.ffmpeg_path,
             render_bgm=render_bgm,
             swap_lr=bool(self.swap_lr_var.get()),

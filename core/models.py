@@ -237,6 +237,55 @@ class MixStats:
     gain_applied: float
 
 
+@dataclass(frozen=True)
+class HiHatConflictRemoval:
+    """Record of an HH Close (11) or LP (1B) note deleted because HH Open (18) owns the tick."""
+
+    measure: int
+    pos: Fraction
+    tab: TabId
+    channel: str
+    wav_id: str
+    filename: str
+
+
+@dataclass(frozen=True)
+class TomOverflowRecord:
+    """Record of a simultaneous Tom (HT/LT/FT) overflow routed to SE7 (67) or reflowed to bgm.ogg."""
+
+    measure: int
+    pos: Fraction
+    source_tab: TabId
+    source_channel: str
+    wav_id: str
+    filename: str
+    target_channel: str  # "67" (SE7) or "BGM"
+
+
+@dataclass(frozen=True)
+class MergedSliceOccurrence:
+    """One chart position where a deduplicated composite slice is placed."""
+
+    measure: int
+    pos: Fraction
+    tab: TabId
+    channel: str
+
+
+@dataclass
+class MergedSliceSpec:
+    """Deduplicated composite slice generated from simultaneous distinct hits on a drum lane."""
+
+    combo_key: Tuple[Tuple[str, bool], ...]  # sorted unique (canonical_orig_wav_id, effective_swap)
+    dtx_wav_id: str
+    first_tab: TabId
+    components: Tuple[Tuple[str, bool, str], ...]  # (orig_wav_id, effective_swap, resolved_name)
+    occurrences: List[MergedSliceOccurrence] = field(default_factory=list)
+    output_filename: str = ""
+    peak_before_norm: float = 0.0
+    gain_applied: float = 1.0
+
+
 @dataclass
 class ConversionResult:
     """Full result of a BMS -> DTX conversion."""
@@ -264,3 +313,9 @@ class ConversionResult:
     bga_copied_files: List[Path] = field(default_factory=list)
     auto_lp_placed_count: int = 0
     project_json_path: Optional[Path] = None
+    log_path: Optional[Path] = None
+    import_warnings: List[ConversionWarning] = field(default_factory=list)
+    export_warnings: List[ConversionWarning] = field(default_factory=list)
+    hihat_conflict_removals: List[HiHatConflictRemoval] = field(default_factory=list)
+    tom_overflow_records: List[TomOverflowRecord] = field(default_factory=list)
+    merged_slices: List[MergedSliceSpec] = field(default_factory=list)

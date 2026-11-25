@@ -19,9 +19,11 @@ from core import (
     PROJECT_MAPPING_FILENAME,
     TAB_SPEC_MAP,
     TAB_SPECS,
+    TOM_OVERFLOW_SE_CHANNEL,
     AutoLpConfig,
     BmsChart,
     ConversionResult,
+    ConversionWarning,
     MappingConfig,
     TabId,
     WavEntry,
@@ -887,6 +889,48 @@ def build_health_summary(chart: BmsChart) -> List[Tuple[str, str]]:
     ]
 
 
+_IMPORT_WARNING_TAG_KEYS: Dict[str, str] = {
+    "UNDEFINED_WAV_REFERENCE": "warn_tag_undef_wav",
+    "MISSING_AUDIO_FILES": "warn_tag_missing_audio",
+    "STOP_UNSUPPORTED": "warn_tag_stop",
+    "UNEXPANDED_RANDOM_BRANCH": "warn_tag_random",
+    "UNCLOSED_LONG_NOTE": "warn_tag_unclosed_ln",
+    "BASE62_DETECTED": "warn_tag_base62",
+    "WAV_LIMIT_EXCEEDED_LOCK_TOGGLE_OFF": "warn_tag_wav_limit",
+    "MISSING_PREVIEW_FILE": "warn_tag_missing_preview",
+}
+
+
+def summarize_import_warning_tags(
+    warnings: Sequence[ConversionWarning], *, max_tags: int = 4
+) -> str:
+    """Return concise red summary tags for source-chart import warnings (empty when none)."""
+    if not warnings:
+        return ""
+    tags: List[str] = []
+    seen_tags: set[str] = set()
+    other_count = 0
+    for w in warnings:
+        key = _IMPORT_WARNING_TAG_KEYS.get(w.code)
+        if key is None:
+            other_count += 1
+            continue
+        label = tr(key)
+        if label not in seen_tags:
+            seen_tags.add(label)
+            tags.append(label)
+
+    if len(tags) > max_tags:
+        extra = len(tags) - max_tags + (1 if other_count else 0)
+        shown = tags[:max_tags]
+        shown.append(tr("warn_tag_other", count=extra))
+        return tr("warn_tag_prefix") + " / ".join(shown)
+
+    if other_count > 0:
+        tags.append(tr("warn_tag_other", count=other_count))
+    return tr("warn_tag_prefix") + " / ".join(tags)
+
+
 def format_warnings(warnings: Sequence[Any]) -> str:
     if not warnings:
         return tr("no_warnings_text")
@@ -918,8 +962,28 @@ def build_result_summary(result: ConversionResult) -> str:
     lines.append(tr("result_placed_notes", count=result.placed_note_count))
     if result.auto_lp_placed_count > 0:
         lines.append(tr("result_auto_lp_line", count=result.auto_lp_placed_count))
+    if result.hihat_conflict_removals:
+        lines.append(
+            tr("result_hihat_removed_line", count=len(result.hihat_conflict_removals))
+        )
+    se7_count = sum(
+        1 for rec in result.tom_overflow_records if rec.target_channel == TOM_OVERFLOW_SE_CHANNEL
+    )
+    if se7_count > 0:
+        lines.append(tr("result_tom_se7_line", count=se7_count))
+    if result.merged_slices:
+        total_hits = sum(len(spec.occurrences) for spec in result.merged_slices)
+        lines.append(
+            tr(
+                "result_merged_slices_line",
+                unique=len(result.merged_slices),
+                total=total_hits,
+            )
+        )
     if result.project_json_path is not None:
         lines.append(tr("result_project_json_line", path=result.project_json_path))
+    if result.log_path is not None:
+        lines.append(tr("result_log_line", path=result.log_path))
     lines.append(
         tr(
             "result_copied_transcoded",
@@ -932,8 +996,18 @@ def build_result_summary(result: ConversionResult) -> str:
     if result.toggle_off_forced:
         lines.append(tr("result_toggle_off_forced"))
     lines.append("")
-    lines.append(tr("result_warnings_header", count=len(result.warnings)))
-    lines.append(format_warnings(result.warnings))
+
+    # Decouple export warnings from source import warnings so import issues are not rewritten on export
+    if result.export_warnings or result.import_warnings or result.log_path is not None:
+        shown_warnings = result.export_warnings
+    else:
+        shown_warnings = result.warnings
+
+    lines.append(tr("result_warnings_header", count=len(shown_warnings)))
+    lines.append(format_warnings(shown_warnings))
+    if result.import_warnings:
+        lines.append("")
+        lines.append(tr("result_import_warnings_note", count=len(result.import_warnings)))
     return "\n".join(lines)
 
 

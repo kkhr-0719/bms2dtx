@@ -518,23 +518,26 @@ class TestSeAllocatorSlicerCollapseAndOverflow(unittest.TestCase):
             )
             plan_off = build_mapping_plan(chart, cfg_off)
 
-            placed_by_measure = {n.measure: n for n in plan_off.tab_placed_notes if n.measure in (1, 2, 3)}
-            self.assertEqual(placed_by_measure[1].original_wav_id, "02")  # default bound beat BGM order
-            self.assertEqual(placed_by_measure[2].original_wav_id, "04")  # playable beat BGM default
-            self.assertEqual(placed_by_measure[3].original_wav_id, "05")  # order_index tiebreak
+            # Non-Tom drum collisions (SD & BD) merge into deduplicated composite slices!
+            self.assertEqual(len(plan_off.merged_slices), 2)
+            sd_note = [n for n in plan_off.tab_placed_notes if n.measure == 1][0]
+            bd_note = [n for n in plan_off.tab_placed_notes if n.measure == 2][0]
+            self.assertEqual(sd_note.dtx_wav_id, plan_off.merged_slices[0].dtx_wav_id)
+            self.assertEqual(bd_note.dtx_wav_id, plan_off.merged_slices[1].dtx_wav_id)
+
+            other_note = [n for n in plan_off.tab_placed_notes if n.measure == 3][0]
+            self.assertEqual(other_note.original_wav_id, "05")  # order_index tiebreak
 
             guitar_winners = [n.original_wav_id for n in plan_off.tab_placed_notes if n.measure == 4]
             self.assertEqual(guitar_winners, ["07", "08"])
 
-            # Toggle=OFF: displaced 01, 03, 06, 09 reflowed into unmapped_events for bgm.ogg
+            # Toggle=OFF: Other(06) & Guitar(09) displaced into unmapped_events for bgm.ogg
             displaced_ids = [ev.wav_id for ev in plan_off.tab_collision_events]
-            self.assertEqual(displaced_ids, ["01", "03", "06", "09"])
+            self.assertEqual(displaced_ids, ["06", "09"])
             unmapped_ids = {ev.wav_id for ev in plan_off.unmapped_events}
-            self.assertTrue({"01", "03", "06", "09"}.issubset(unmapped_ids))
+            self.assertTrue({"06", "09"}.issubset(unmapped_ids))
 
             col_warn = [w for w in plan_off.warnings if w.code == "TAB_LANE_COLLISION"][0]
-            self.assertIn("M001 SD(12) #WAV01", col_warn.message)
-            self.assertIn("M002 BD(13) #WAV03", col_warn.message)
             self.assertIn("M003 OTHER(66) #WAV06", col_warn.message)
             self.assertIn("M004 GUITAR(71/72) #WAV09", col_warn.message)
             self.assertIn("bgm.ogg", col_warn.message)
@@ -988,6 +991,180 @@ class TestSeAllocatorSlicerCollapseAndOverflow(unittest.TestCase):
             self.assertEqual(plan_empty.auto_lp_placed_count, 0)
             self.assertNotIn("ZY", plan_empty.wav_volumes)
             self.assertNotIn("ZZ", plan_empty.wav_volumes)
+
+    def test_v051_hihat_open_conflict_removes_chh_and_lp_never_reflows_and_autolp_skips_ohh(self) -> None:
+        from core.constants import AUTO_LP_CHIP_AUTO
+        from core.models import AutoLpConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for fn in ("hho.wav", "hhc.wav", "lp.wav"):
+                (root / fn).write_bytes(b"dummy")
+            bms = root / "hh_conflict.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE HHConflict",
+                        "#BPM 120",
+                        "#WAV01 hho.wav",
+                        "#WAV02 hhc.wav",
+                        "#WAV03 lp.wav",
+                        # M001 beat 0: OHH(01) + CHH(02) + LP(03) simultaneously -> keep ONLY 18(OHH), delete 11 & 1B!
+                        "#00111:01000000",
+                        "#00112:02000000",
+                        "#00113:03000000",
+                        # M001 beat 1/4: CHH(02) alone -> Auto-LP inserts 1B here
+                        "#00112:00020000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+            plan = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={
+                        TabId.HH_OPEN: ["01"],
+                        TabId.HH_CLOSE: ["02"],
+                        TabId.LP: ["03"],
+                    },
+                    auto_lp=AutoLpConfig(chip_mode=AUTO_LP_CHIP_AUTO),
+                ),
+            )
+            # M001 pos 0 has ONLY channel 18 (HH Open), NO 11 (CHH) and NO 1B (LP)
+            m1_beat0 = [n for n in plan.tab_placed_notes if n.measure == 1 and n.pos == 0]
+            self.assertEqual([(n.channel, n.original_wav_id) for n in m1_beat0], [("18", "01")])
+
+            # Deleted notes must NEVER reflow into unmapped_events (bgm.ogg) or SE
+            self.assertEqual(plan.unmapped_events, [])
+            self.assertEqual(len(plan.hihat_conflict_removals), 2)
+            self.assertEqual(
+                [(r.tab, r.channel, r.wav_id, r.filename) for r in plan.hihat_conflict_removals],
+                [
+                    (TabId.HH_CLOSE, "11", "02", "hhc.wav"),
+                    (TabId.LP, "1B", "03", "lp.wav"),
+                ],
+            )
+            hh_warns = [w for w in plan.warnings if w.code == "HIHAT_OPEN_CONFLICT_REMOVED"]
+            self.assertEqual(len(hh_warns), 2)
+            self.assertIn("hhc.wav", hh_warns[0].message)
+            self.assertIn("lp.wav", hh_warns[1].message)
+
+            # Auto-LP still works on M001 pos 1/4 (CHH after OHH) and never touches pos 0
+            self.assertEqual(plan.auto_lp_placed_count, 1)
+            lp_notes = [n for n in plan.tab_placed_notes if n.channel == "1B"]
+            self.assertEqual([(n.measure, float(n.pos)) for n in lp_notes], [(1, 0.25)])
+
+    def test_v051_tom_overflow_uses_se7_single_note_only_and_third_reflows_to_bgm(self) -> None:
+        from core.constants import TOM_OVERFLOW_SE_CHANNEL
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for idx in range(1, 7):
+                (root / f"tom{idx}.wav").write_bytes(b"dummy")
+            bms = root / "tom_overflow.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE TomOverflow",
+                        "#BPM 120",
+                        *[f"#WAV0{idx} tom{idx}.wav" for idx in range(1, 7)],
+                        # M001 pos 0: HT has two distinct slices 01, 02 -> 01 stays on 14, 02 routes to SE7 (67)
+                        "#00111:01",
+                        "#00101:02",
+                        # M002 pos 0: Identical slice 01 twice on LT -> deduped cleanly, NO overflow to SE7
+                        "#00211:01",
+                        "#00201:01",
+                        # M003 pos 0: 3 distinct HT slices (01, 02, 03) + 2 distinct FT slices (04, 05)
+                        # -> 01 stays 14, 04 stays 17; 1st overflow (02) -> SE7 (67); extras (03, 05) -> bgm.ogg + warnings
+                        "#00311:01",
+                        "#00301:02",
+                        "#00301:03",
+                        "#00312:04",
+                        "#00301:05",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+            plan = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={
+                        TabId.HT: ["01", "02", "03"],
+                        TabId.FT: ["04", "05"],
+                    },
+                    toggle_on=False,
+                ),
+            )
+            self.assertEqual(plan.merged_slices, [])  # Toms never mix-merge!
+            se_channels_used = {n.channel for n in plan.tab_placed_notes if int(n.channel, 16) >= 0x60}
+            self.assertEqual(se_channels_used, {TOM_OVERFLOW_SE_CHANNEL})  # Only "67" (SE7), never 61..66/71..74
+
+            se7_notes = [(n.measure, n.original_wav_id) for n in plan.tab_placed_notes if n.channel == "67"]
+            self.assertEqual(se7_notes, [(1, "02"), (3, "02")])
+
+            unmapped_ids = [(ev.measure, ev.wav_id) for ev in plan.unmapped_events]
+            self.assertEqual(unmapped_ids, [(3, "03"), (3, "05")])
+
+            tom_reflow_warns = [w for w in plan.warnings if w.code == "TOM_OVERFLOW_BGM_REFLOW"]
+            self.assertEqual(len(tom_reflow_warns), 2)
+            self.assertIn("#WAV03", tom_reflow_warns[0].message)
+            self.assertIn("#WAV05", tom_reflow_warns[1].message)
+
+    def test_v051_non_tom_drum_collision_dedup_global_cache_and_slot_limit_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for fn in ("sd1.wav", "sd2.wav", "sd3.wav"):
+                (root / fn).write_bytes(b"dummy")
+            bms = root / "drum_dedup_cache.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE DrumDedupCache",
+                        "#BPM 120",
+                        "#WAV01 sd1.wav",
+                        "#WAV02 sd2.wav",
+                        "#WAV03 sd3.wav",
+                        # M001 pos 0: identical (01, swap=False) twice -> merged to 1 note, NO merged slice!
+                        "#00111:01",
+                        "#00101:01",
+                        # M002 pos 0: 01 + 02 simultaneously -> generates 1 merged slice
+                        "#00211:01",
+                        "#00201:02",
+                        # M003 pos 0: 02 + 01 reversed order -> SAME combo_key, must reuse the EXACT same merged WAV ID!
+                        "#00311:02",
+                        "#00301:01",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart = parse_bms(bms)
+            plan = build_mapping_plan(
+                chart,
+                MappingConfig(tab_wavs={TabId.SD: ["01", "02", "03"]}, toggle_on=False),
+            )
+            self.assertEqual(len(plan.merged_slices), 1)
+            spec = plan.merged_slices[0]
+            self.assertEqual(spec.dtx_wav_id, "05")  # 01=bgm, 02..04=retained 01..03, 05=first merged slot
+            self.assertEqual(len(spec.occurrences), 2)
+            m2_note = [n for n in plan.tab_placed_notes if n.measure == 2][0]
+            m3_note = [n for n in plan.tab_placed_notes if n.measure == 3][0]
+            self.assertEqual(m2_note.dtx_wav_id, "05")
+            self.assertEqual(m3_note.dtx_wav_id, "05")
+            self.assertEqual(plan.unmapped_events, [])
+
+            # Different swapped_wav_ids on one member changes combo_key (separate entry)
+            plan_swap_diff = build_mapping_plan(
+                chart,
+                MappingConfig(
+                    tab_wavs={TabId.SD: ["01", "02", "03"]},
+                    swapped_wav_ids=["02"],
+                    toggle_on=False,
+                ),
+            )
+            self.assertEqual(len(plan_swap_diff.merged_slices), 1)
+            self.assertEqual(plan_swap_diff.merged_slices[0].combo_key, (("01", False), ("02", True)))
 
 
 if __name__ == "__main__":

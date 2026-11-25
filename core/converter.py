@@ -16,14 +16,17 @@ from .constants import (
     AUTO_LP_THRESHOLD_MS,
     AUTO_LP_THRESHOLD_NOTE,
     AUTO_LP_VALID_DENOMINATORS,
+    CONVERSION_LOG_FILENAME,
     PROJECT_MAPPING_FILENAME,
+    TOM_OVERFLOW_SE_CHANNEL,
     TabId,
 )
 from .dtx_writer import generate_dtx_text, write_dtx_file
-from .mapping import build_mapping_plan
+from .mapping import MappingPlan, build_mapping_plan
 from .mixer import (
     materialize_bga,
     materialize_images,
+    materialize_merged_slices,
     materialize_preview_audio,
     materialize_retained_slices,
     render_bgm_ogg,
@@ -102,7 +105,7 @@ def build_project_mapping_dict(
     )
     alp = config.auto_lp
     data: Dict[str, Any] = {
-        "version": "0.5.0",
+        "version": "0.5.1",
         "tab_wavs": {t.value: list(ids) for t, ids in src_tabs.items() if ids},
         "default_lane_binds": {t.value: w for t, w in src_binds.items() if w},
         "default_bind_mode": config.default_bind_mode,
@@ -121,6 +124,147 @@ def build_project_mapping_dict(
         },
     }
     return data
+
+
+def build_conversion_log_text(
+    chart: BmsChart,
+    plan: MappingPlan,
+    *,
+    dtx_name: str,
+    dtx_encoding: str,
+    placed_note_count: int,
+    mix_stats: Optional[MixStats],
+    import_warnings: Sequence[ConversionWarning],
+    export_warnings: Sequence[ConversionWarning],
+    effective_toggle_on: bool,
+) -> str:
+    """Build deterministic UTF-8 conversion log text (__bms2dtx_log.txt)."""
+    se7_count = sum(
+        1 for rec in plan.tom_overflow_records if rec.target_channel == TOM_OVERFLOW_SE_CHANNEL
+    )
+    tom_bgm_count = sum(
+        1 for rec in plan.tom_overflow_records if rec.target_channel != TOM_OVERFLOW_SE_CHANNEL
+    )
+    merged_reuse_total = sum(len(spec.occurrences) for spec in plan.merged_slices)
+
+    lines: List[str] = [
+        "=== bms2dtx Conversion Log (v0.5.1) ===",
+        f"Source Chart : {chart.source_path.name}",
+        f"Title        : {chart.full_title}",
+        f"Output DTX   : {dtx_name} ({dtx_encoding})",
+        f"Mode         : {'Toggle = ON' if effective_toggle_on else 'Toggle = OFF (bgm.ogg)'}",
+        f"Placed Notes : {placed_note_count}",
+        f"Auto-LP Added: {plan.auto_lp_placed_count}",
+    ]
+    if mix_stats is not None:
+        lines.append(
+            f"bgm.ogg Mix  : {mix_stats.mixed_event_count} events, "
+            f"duration={mix_stats.duration_sec:.2f}s, peak={mix_stats.peak_after_norm:.4f}, "
+            f"rms={mix_stats.rms:.4f}, gain={mix_stats.gain_applied:.4f}"
+        )
+    lines.extend(
+        [
+            f"Hi-Hat HH Open Conflict Removals : {len(plan.hihat_conflict_removals)}",
+            f"Tom Overflow -> SE7 (67)         : {se7_count}",
+            f"Tom Overflow -> bgm.ogg (>cap)   : {tom_bgm_count}",
+            f"Merged Drum Combos               : {len(plan.merged_slices)} unique ({merged_reuse_total} hits)",
+            f"Import Warnings                  : {len(import_warnings)}",
+            f"Export Warnings                  : {len(export_warnings)}",
+            "",
+        ]
+    )
+
+    if plan.merged_slices:
+        lines.append("[1] Deduplicated Merged Drum Slices")
+        for spec in plan.merged_slices:
+            comp_desc = " + ".join(
+                f"#WAV{wid}({fname}{', L/R-swap' if eff_swap else ''})"
+                for wid, eff_swap, fname in spec.components
+            )
+            clip_note = (
+                f", peak={spec.peak_before_norm:.4f} > 0.99 -> scale={spec.gain_applied:.4f}"
+                if spec.gain_applied < 0.999999
+                else f", peak={spec.peak_before_norm:.4f} (no clipping scale)"
+            )
+            lines.append(
+                f"  - #WAV{spec.dtx_wav_id} -> {spec.output_filename or '(dry-run)'} | "
+                f"reused {len(spec.occurrences)}x{clip_note} | sources: {comp_desc}"
+            )
+        lines.append("")
+
+    # Chronological event timeline sorted strictly by (measure, pos, kind, detail)
+    timeline_entries: List[Tuple[int, Fraction, int, str]] = []
+    for rec in plan.hihat_conflict_removals:
+        timeline_entries.append(
+            (
+                rec.measure,
+                rec.pos,
+                0,
+                f"M{rec.measure:03d} pos={rec.pos} [HIHAT_OPEN_CONFLICT_REMOVED] "
+                f"Deleted {rec.tab.value}({rec.channel}) #WAV{rec.wav_id} ({rec.filename}) "
+                f"because HH Open (18) owns this tick.",
+            )
+        )
+    for rec in plan.tom_overflow_records:
+        if rec.target_channel == TOM_OVERFLOW_SE_CHANNEL:
+            timeline_entries.append(
+                (
+                    rec.measure,
+                    rec.pos,
+                    1,
+                    f"M{rec.measure:03d} pos={rec.pos} [TOM_OVERFLOW_SE7] "
+                    f"Routed {rec.source_tab.value}({rec.source_channel}) #WAV{rec.wav_id} "
+                    f"({rec.filename}) -> SE7 ({TOM_OVERFLOW_SE_CHANNEL}).",
+                )
+            )
+        else:
+            timeline_entries.append(
+                (
+                    rec.measure,
+                    rec.pos,
+                    2,
+                    f"M{rec.measure:03d} pos={rec.pos} [TOM_OVERFLOW_BGM_REFLOW] WARNING: "
+                    f"{rec.source_tab.value}({rec.source_channel}) #WAV{rec.wav_id} "
+                    f"({rec.filename}) exceeded SE7 (67) single-note cap; reflowed to bgm.ogg.",
+                )
+            )
+    for spec in plan.merged_slices:
+        comp_ids = "+".join(wid for wid, _sw, _fn in spec.components)
+        for occ in spec.occurrences:
+            timeline_entries.append(
+                (
+                    occ.measure,
+                    occ.pos,
+                    3,
+                    f"M{occ.measure:03d} pos={occ.pos} [MERGED_SLICE_PLACED] "
+                    f"{occ.tab.value}({occ.channel}) -> #WAV{spec.dtx_wav_id} "
+                    f"({spec.output_filename or comp_ids}) [sources: {comp_ids}].",
+                )
+            )
+
+    if timeline_entries:
+        lines.append("[2] Measure-Ordered Collision & Merge Events")
+        timeline_entries.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        for _m, _p, _prio, desc in timeline_entries:
+            lines.append(f"  - {desc}")
+        lines.append("")
+
+    lines.append(f"[3] Export Warnings ({len(export_warnings)})")
+    if export_warnings:
+        for w in export_warnings:
+            lines.append(f"  - [{w.code}] {w.message}")
+    else:
+        lines.append("  (None)")
+    lines.append("")
+
+    lines.append(f"[4] Source Chart Import Warnings ({len(import_warnings)})")
+    if import_warnings:
+        for w in import_warnings:
+            lines.append(f"  - [{w.code}] {w.message}")
+    else:
+        lines.append("  (None)")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def inspect_bms(path: Path | str) -> BmsChart:
@@ -152,14 +296,15 @@ def convert_bms(
             "to guarantee original files remain read-only (AGENTS.md Rule 1)."
         )
 
-    all_warnings: List[ConversionWarning] = list(chart.warnings)
+    import_warnings: List[ConversionWarning] = list(chart.warnings)
+    export_warnings: List[ConversionWarning] = []
 
     if chart.preview is None and chart.headers.get("PREVIEW", "").strip():
         raw_prev = chart.headers["PREVIEW"].strip()
         prev_entry = ParentFolderAudioIndex(chart.source_dir).resolve_wav("PREVIEW", raw_prev)
         chart.preview = prev_entry
         if not prev_entry.exists or prev_entry.resolved_path is None:
-            all_warnings.append(
+            import_warnings.append(
                 ConversionWarning(
                     code="MISSING_PREVIEW_FILE",
                     message=(
@@ -183,7 +328,10 @@ def convert_bms(
             "to guarantee original files remain read-only (AGENTS.md Rule 1)."
         )
 
-    plan = build_mapping_plan(chart, config)
+    local_decode_cache: Dict[Tuple[Path, int], bytes] = (
+        decode_cache if decode_cache is not None else {}
+    )
+    plan = build_mapping_plan(chart, config, global_swap_lr=options.swap_lr)
 
     effective_toggle_on = plan.effective_toggle_on
     toggle_off_forced = plan.toggle_off_forced
@@ -213,20 +361,26 @@ def convert_bms(
                 separate_lbd=config.separate_lbd,
                 default_bind_mode=config.default_bind_mode,
                 auto_lp=config.auto_lp,
+                swapped_wav_ids=config.swapped_wav_ids,
             )
-            plan = build_mapping_plan(chart, fallback_cfg, auto_merge_duplicates=False)
-            all_warnings.extend(plan.warnings)
-            all_warnings.extend(se_result.warnings)
+            plan = build_mapping_plan(
+                chart,
+                fallback_cfg,
+                auto_merge_duplicates=False,
+                global_swap_lr=options.swap_lr,
+            )
+            export_warnings.extend(plan.warnings)
+            export_warnings.extend(se_result.warnings)
             effective_toggle_on = False
             toggle_off_forced = True
             placed_notes = list(plan.tab_placed_notes)
         else:
-            all_warnings.extend(plan.warnings)
-            all_warnings.extend(se_result.warnings)
+            export_warnings.extend(plan.warnings)
+            export_warnings.extend(se_result.warnings)
             placed_notes.extend(se_result.placed_notes)
             nudged_overflow_count = se_result.nudged_count
     else:
-        all_warnings.extend(plan.warnings)
+        export_warnings.extend(plan.warnings)
 
     dtx_name = options.output_dtx_name or f"{chart.source_path.stem}.dtx"
     if not dtx_name.lower().endswith(".dtx"):
@@ -254,9 +408,32 @@ def convert_bms(
             swapped_wav_ids=config.swapped_wav_ids,
         )
     )
-    all_warnings.extend(mat_warnings)
+    export_warnings.extend(mat_warnings)
 
     claimed_names: List[str] = list(orig_to_out_name.values())
+
+    # Materialize deduplicated merged drum slices (if any)
+    merged_id_to_out_name: Dict[str, str] = {}
+    if plan.merged_slices:
+        merged_id_to_out_name, merged_wavs, merged_oggs, merge_warnings = (
+            materialize_merged_slices(
+                chart,
+                plan.merged_slices,
+                output_dir,
+                claimed_names,
+                sample_rate=options.sample_rate,
+                transcode_wav_to_ogg=options.transcode_wav_to_ogg,
+                copy_files=options.copy_retained_audio,
+                ogg_quality=options.ogg_quality,
+                ffmpeg_path=options.ffmpeg_path,
+                reserve_bgm_ogg=not effective_toggle_on,
+                decode_cache=local_decode_cache,
+            )
+        )
+        export_warnings.extend(merge_warnings)
+        copied_files.extend(merged_wavs)
+        transcoded_files.extend(merged_oggs)
+        claimed_names.extend(merged_id_to_out_name.values())
 
     # Materialize #PREVIEW audio file (copy/swap, avoiding name collision with slices or bgm.ogg)
     preview_dtx_rel, preview_dst_path = materialize_preview_audio(
@@ -292,7 +469,7 @@ def convert_bms(
         reserve_bgm_ogg=not effective_toggle_on,
         ffmpeg_path=options.ffmpeg_path,
     )
-    all_warnings.extend(img_warnings)
+    export_warnings.extend(img_warnings)
     for rel_item in (stagefile_rel, preimage_rel, background_rel):
         if rel_item:
             claimed_names.append(rel_item)
@@ -312,10 +489,10 @@ def convert_bms(
             copy_files=options.copy_retained_audio,
             reserve_bgm_ogg=not effective_toggle_on,
         )
-        all_warnings.extend(bga_warnings)
+        export_warnings.extend(bga_warnings)
 
     # Build final DTX #WAVxx table in exact sequential Base-36 order (01..ZX),
-    # then append reserved Auto-LP ZY / ZZ entries if enabled.
+    # then append deduplicated merged slices and reserved Auto-LP ZY / ZZ entries if enabled.
     dtx_wav_table: List[Tuple[str, str]] = []
     if not effective_toggle_on:
         dtx_wav_table.append(("01", "bgm.ogg"))
@@ -328,6 +505,12 @@ def convert_bms(
             out_name = entry.resolved_name if entry else f"missing_{orig_wid}.wav"
         dtx_wav_table.append((dtx_wid, out_name))
         slot_to_out_name[dtx_wid] = out_name
+
+    for spec in plan.merged_slices:
+        merged_name = merged_id_to_out_name.get(spec.dtx_wav_id) or spec.output_filename
+        if merged_name:
+            dtx_wav_table.append((spec.dtx_wav_id, merged_name))
+            slot_to_out_name[spec.dtx_wav_id] = merged_name
 
     if plan.auto_lp_use_zy and plan.auto_lp_orig_wav_id is not None:
         zy_out = orig_to_out_name.get(plan.auto_lp_orig_wav_id)
@@ -372,12 +555,12 @@ def convert_bms(
             sample_rate=options.sample_rate,
             ogg_quality=options.ogg_quality,
             ffmpeg_path=options.ffmpeg_path,
-            decode_cache=decode_cache,
+            decode_cache=local_decode_cache,
             cut_same_wav=options.cut_same_wav,
             swap_lr=options.swap_lr,
             swapped_wav_ids=config.swapped_wav_ids,
         )
-        all_warnings.extend(mix_warnings)
+        export_warnings.extend(mix_warnings)
 
     # Generate and write .dtx file
     dtx_text, writer_warnings = generate_dtx_text(
@@ -398,12 +581,14 @@ def convert_bms(
         bga_headers=bga_headers,
         bga_placed_events=bga_placed_events,
     )
-    all_warnings.extend(writer_warnings)
+    export_warnings.extend(writer_warnings)
 
     dtx_encoding, enc_warnings = write_dtx_file(
         dtx_text, dtx_path, utf8=options.utf8
     )
-    all_warnings.extend(enc_warnings)
+    export_warnings.extend(enc_warnings)
+
+    all_warnings: List[ConversionWarning] = import_warnings + export_warnings
 
     # Auto-save reproducible project mapping JSON (__bms2dtx.json) inside output_dir
     project_json_path = output_dir / PROJECT_MAPPING_FILENAME
@@ -413,6 +598,22 @@ def convert_bms(
             json.dumps(project_dict, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    # Write conversion log (__bms2dtx_log.txt) at top of output_dir (UTF-8)
+    log_path = output_dir / CONVERSION_LOG_FILENAME
+    if log_path.resolve() not in referenced_src_files:
+        log_text = build_conversion_log_text(
+            chart,
+            plan,
+            dtx_name=dtx_path.name,
+            dtx_encoding=dtx_encoding,
+            placed_note_count=len(placed_notes),
+            mix_stats=mix_stats,
+            import_warnings=import_warnings,
+            export_warnings=export_warnings,
+            effective_toggle_on=effective_toggle_on,
+        )
+        log_path.write_text(log_text, encoding="utf-8")
 
     return ConversionResult(
         chart=chart,
@@ -438,6 +639,12 @@ def convert_bms(
         bga_copied_files=bga_copied_files,
         auto_lp_placed_count=plan.auto_lp_placed_count,
         project_json_path=project_json_path,
+        log_path=log_path,
+        import_warnings=import_warnings,
+        export_warnings=export_warnings,
+        hihat_conflict_removals=plan.hihat_conflict_removals,
+        tom_overflow_records=plan.tom_overflow_records,
+        merged_slices=plan.merged_slices,
     )
 
 

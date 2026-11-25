@@ -561,19 +561,19 @@ class TestMixerAndPipeline(unittest.TestCase):
                 local_root_ffmpeg.write_bytes(b"stub")
                 self.assertEqual(Path(find_ffmpeg()).resolve(), local_root_ffmpeg.resolve())
 
-            # 4. Toggle=OFF Tab collision reflows displaced note into bgm.ogg with clear warning
+            # 4. Toggle=OFF non-drum SE (Other) collision reflows displaced note into bgm.ogg with clear warning
             col_src = root / "reflow_src"
             col_src.mkdir()
-            _write_sine_wav(col_src / "snare_main.wav", 180.0, 0.12, amplitude=0.6)
-            _write_sine_wav(col_src / "snare_reflow.wav", 880.0, 0.12, amplitude=0.6)
+            _write_sine_wav(col_src / "other_main.wav", 180.0, 0.12, amplitude=0.6)
+            _write_sine_wav(col_src / "other_reflow.wav", 880.0, 0.12, amplitude=0.6)
             col_bms = col_src / "reflow.bms"
             col_bms.write_text(
                 "\n".join(
                     [
                         "#TITLE ReflowTest",
                         "#BPM 120",
-                        "#WAV01 snare_main.wav",
-                        "#WAV02 snare_reflow.wav",
+                        "#WAV01 other_main.wav",
+                        "#WAV02 other_reflow.wav",
                         # At measure 000 pos 1/4 (t=0.5s): 01 on playable lane 11, 02 on BGM 01
                         "#00011:00010000",
                         "#00001:00020000",
@@ -584,12 +584,12 @@ class TestMixerAndPipeline(unittest.TestCase):
             res_reflow = convert_bms(
                 col_bms,
                 ConversionOptions(output_dir=root / "reflow_out", render_bgm=True),
-                mapping=MappingConfig(tab_wavs={TabId.SD: ["01", "02"]}, toggle_on=False),
+                mapping=MappingConfig(tab_wavs={TabId.OTHER: ["01", "02"]}, toggle_on=False),
             )
-            # Only winner (01 -> DTX 02) on SD channel 12
+            # Only winner (01 -> DTX 02) on Other channel 66
             dtx_reflow = res_reflow.dtx_path.read_text(encoding="cp932")
-            self.assertIn("#00012: 00020000", dtx_reflow)
-            self.assertNotIn("03", dtx_reflow.split("#00012:")[1].splitlines()[0])
+            self.assertIn("#00066: 00020000", dtx_reflow)
+            self.assertNotIn("03", dtx_reflow.split("#00066:")[1].splitlines()[0])
             # Displaced 02 reflowed into bgm.ogg and is audible at t=0.5s!
             assert res_reflow.bgm_path is not None and res_reflow.mix_stats is not None
             self.assertEqual(res_reflow.mix_stats.mixed_event_count, 1)
@@ -600,7 +600,7 @@ class TestMixerAndPipeline(unittest.TestCase):
             col_warnings = [w for w in res_reflow.warnings if w.code == "TAB_LANE_COLLISION"]
             self.assertEqual(len(col_warnings), 1)
             self.assertIn("M000", col_warnings[0].message)
-            self.assertIn("SD(12)", col_warnings[0].message)
+            self.assertIn("OTHER(66)", col_warnings[0].message)
             self.assertIn("#WAV02", col_warnings[0].message)
 
     def test_preview_audio_resolution_copy_collision_and_missing_warning(self) -> None:
@@ -1377,6 +1377,107 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertLess(float(np.max(np.abs(da2[:, 1]))), 0.01)
             self.assertLess(float(np.max(np.abs(db2[:, 0]))), 0.01)
             self.assertGreater(float(np.max(np.abs(db2[:, 1]))), 0.2)
+
+    def test_v051_merged_slice_per_slice_lr_swap_peak_limiting_and_log_output(self) -> None:
+        import numpy as np
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            sr = 44100
+            t = np.arange(int(sr * 0.1), dtype=np.float32) / sr
+            # Both clips are 0.80 amplitude Left-only in source!
+            # When combined with 02 swapped -> L has 0.80 (from 01), R has 0.80 (from swapped 02), no clip.
+            # When 01 & 03 are both unswapped Left-only -> L peak = 1.60 > 0.99 -> scaled by 0.99/1.60!
+            loud_left = np.column_stack([(0.8 * np.sin(2 * np.pi * 330 * t)).astype(np.float32), np.zeros_like(t)])
+            loud_left_hi = np.column_stack([(0.8 * np.sin(2 * np.pi * 660 * t)).astype(np.float32), np.zeros_like(t)])
+            tom_sig = np.column_stack([(0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)] * 2)
+            sf.write(str(src / "sn1.wav"), loud_left, sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "sn2.wav"), loud_left_hi, sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "tom1.wav"), tom_sig, sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "tom2.wav"), tom_sig, sr, format="WAV", subtype="PCM_16")
+
+            bms = src / "merge_e2e.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE MergeE2E",
+                        "#PLAYLEVEL 9",
+                        "#BPM 120",
+                        "#WAV01 sn1.wav",
+                        "#WAV02 sn2.wav",
+                        "#WAV03 missing_ghost.wav",
+                        "#WAV04 tom1.wav",
+                        "#WAV05 tom2.wav",
+                        # M001: SD 01 + 02 simultaneously
+                        "#00111:01",
+                        "#00101:02",
+                        # M002: Repeat exact same SD combo (02 + 01) -> must reuse single WAV file!
+                        "#00211:02",
+                        "#00201:01",
+                        # M003: Tom (HT) 04 + 05 -> 04 stays on 14, 05 routes to SE7 (67)
+                        "#00314:04",
+                        "#00301:05",
+                        # M004: Referenced missing audio triggers MISSING_AUDIO_FILES import warning
+                        "#00401:03",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            # Case A: swapped_wav_ids=["02"] -> 01 stays L, 02 flips to R -> stereo peak <= 0.82 (no clipping!)
+            out_lr = root / "out_lr"
+            res_lr = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_lr, render_bgm=True),
+                mapping=MappingConfig(
+                    tab_wavs={TabId.SD: ["01", "02"], TabId.HT: ["04", "05"]},
+                    swapped_wav_ids=["02"],
+                ),
+            )
+            dtx_text = res_lr.dtx_path.read_text(encoding="cp932")
+            # Default export omits #DLEVEL even when #PLAYLEVEL 9 is present
+            self.assertNotIn("#DLEVEL", dtx_text)
+            self.assertIn("#00367: ", dtx_text)
+            self.assertEqual(len(res_lr.merged_slices), 1)
+            mix_spec = res_lr.merged_slices[0]
+            self.assertEqual(len(mix_spec.occurrences), 2)
+            self.assertAlmostEqual(mix_spec.gain_applied, 1.0, places=4)
+            mix_audio, _ = sf.read(str(out_lr / mix_spec.output_filename), dtype="float32", always_2d=True)
+            self.assertGreater(float(np.max(np.abs(mix_audio[:, 0]))), 0.6)
+            self.assertGreater(float(np.max(np.abs(mix_audio[:, 1]))), 0.6)
+
+            # Case B: neither swapped -> L sums 0.8+0.8 -> clipped/limited to 0.99
+            out_clip = root / "out_clip"
+            res_clip = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_clip, render_bgm=True),
+                mapping=MappingConfig(
+                    tab_wavs={TabId.SD: ["01", "02"], TabId.HT: ["04", "05"]},
+                    swapped_wav_ids=[],
+                ),
+            )
+            clip_spec = res_clip.merged_slices[0]
+            self.assertGreater(clip_spec.peak_before_norm, 1.1)
+            self.assertLess(clip_spec.gain_applied, 0.9)
+            clip_audio, _ = sf.read(str(out_clip / clip_spec.output_filename), dtype="float32", always_2d=True)
+            self.assertLessEqual(float(np.max(np.abs(clip_audio[:, 0]))), 0.995)
+
+            # Verify __bms2dtx_log.txt at top of output_dir
+            assert res_clip.log_path is not None and res_clip.log_path.is_file()
+            self.assertEqual(res_clip.log_path.name, "__bms2dtx_log.txt")
+            log_text = res_clip.log_path.read_text(encoding="utf-8")
+            self.assertIn("Deduplicated Merged Drum Slices", log_text)
+            self.assertIn("reused 2x", log_text)
+            self.assertIn("scale=", log_text)
+            self.assertIn("TOM_OVERFLOW_SE7", log_text)
+            self.assertIn("MERGED_SLICE_PLACED", log_text)
+            self.assertIn("MISSING_AUDIO_FILES", log_text)
+            # Ensure separate import vs export warning tracking
+            self.assertTrue(any(w.code == "MISSING_AUDIO_FILES" for w in res_clip.import_warnings))
+            self.assertFalse(any(w.code == "MISSING_AUDIO_FILES" for w in res_clip.export_warnings))
 
 
 if __name__ == "__main__":
