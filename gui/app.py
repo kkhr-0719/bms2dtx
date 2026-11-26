@@ -1,4 +1,4 @@
-"""bms2dtx desktop GUI (tkinter / ttk). v0.5.1: Toggle = OFF only."""
+"""bms2dtx desktop GUI (tkinter / ttk). v0.6.0: Toggle = OFF only."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import tkinter.font as tkfont
 
 import core
 from core import (
+    AUTO_LP_CHIP_AUTO,
     AUTO_LP_CHIP_EMPTY_ZZ,
     AUTO_LP_CHIP_NONE,
     AUTO_LP_THRESHOLD_MS,
@@ -624,6 +625,10 @@ class TabPanel:
             target_idx = 0
             if alp.chip_mode in self.auto_lp_chip_values:
                 target_idx = self.auto_lp_chip_values.index(alp.chip_mode)
+            elif str(alp.chip_mode or "").strip().lower() not in ("", AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_EMPTY_ZZ):
+                alp.chip_mode = AUTO_LP_CHIP_AUTO
+                if AUTO_LP_CHIP_AUTO in self.auto_lp_chip_values:
+                    target_idx = self.auto_lp_chip_values.index(AUTO_LP_CHIP_AUTO)
             else:
                 alp.chip_mode = AUTO_LP_CHIP_NONE
             self.auto_lp_combo.current(target_idx)
@@ -818,6 +823,8 @@ class App:
             "default_bind_mode": "auto",
             "swap_lr": False,
             "allow_left_remove": False,
+            "export_drums_ogg": True,
+            "export_four_diffs": True,
             "wav_labels": dict(DEFAULT_WAV_LABELS),
         }
         if self._persist_settings:
@@ -827,6 +834,8 @@ class App:
         self.model = AssignmentModel(default_bind_mode=str(loaded_cfg.get("default_bind_mode", "auto")))
         self.wav_labels: Dict[str, str] = dict(loaded_cfg.get("wav_labels", DEFAULT_WAV_LABELS))
         self.allow_left_remove: bool = bool(loaded_cfg.get("allow_left_remove", False))
+        self.export_drums_ogg: bool = bool(loaded_cfg.get("export_drums_ogg", True))
+        self.export_four_diffs_default: bool = bool(loaded_cfg.get("export_four_diffs", True))
         self.ffmpeg_explicit: Optional[str] = loaded_cfg.get("ffmpeg_path")
         self.ffmpeg_path: Optional[str] = None
         self.last_output_dir: Optional[Path] = None
@@ -1371,6 +1380,14 @@ class App:
         self.ogg_var = tk.BooleanVar(value=False)
         self.ogg_chk = ttk.Checkbutton(opts1, text=tr("transcode_ogg_chk"), variable=self.ogg_var)
         self.ogg_chk.pack(side="left", padx=12)
+        self.four_diffs_var = tk.BooleanVar(value=self.export_four_diffs_default)
+        self.four_diffs_chk = ttk.Checkbutton(
+            opts1,
+            text=tr("four_diffs_chk"),
+            variable=self.four_diffs_var,
+            command=self._on_four_diffs_toggled,
+        )
+        self.four_diffs_chk.pack(side="left", padx=4)
 
         opts2 = ttk.Frame(self.export_frame)
         opts2.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
@@ -1435,6 +1452,13 @@ class App:
         self._update_dirty_flag()
         self.refresh_all()
 
+    def _on_four_diffs_toggled(self) -> None:
+        if self._persist_settings:
+            save_app_settings(
+                {"export_four_diffs": bool(self.four_diffs_var.get())},
+                self.config_path,
+            )
+
     # ---------------------------------------------------- settings & i18n
     def change_language(self, lang_code: str) -> None:
         norm = set_language(lang_code)
@@ -1484,6 +1508,7 @@ class App:
         self.open_out_btn.configure(text=tr("open_output_btn"))
         self.utf8_chk.configure(text=tr("utf8_chk"))
         self.ogg_chk.configure(text=tr("transcode_ogg_chk"))
+        self.four_diffs_chk.configure(text=tr("four_diffs_chk"))
         self.image_mode_label.configure(text=tr("image_mode_label"))
         self._refresh_image_mode_combo()
         self.export_bga_chk.configure(text=tr("export_bga_chk"))
@@ -1668,6 +1693,13 @@ class App:
             container,
             text=tr("settings_allow_left_remove_chk"),
             variable=allow_left_remove_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        export_drums_ogg_var = tk.BooleanVar(value=self.export_drums_ogg)
+        ttk.Checkbutton(
+            container,
+            text=tr("settings_export_drums_ogg_chk"),
+            variable=export_drums_ogg_var,
         ).pack(anchor="w", pady=(0, 8))
 
         # Bottom Save / Cancel
@@ -1687,6 +1719,7 @@ class App:
             self.detect_ffmpeg()
             self.wav_labels = new_labels
             self.allow_left_remove = bool(allow_left_remove_var.get())
+            self.export_drums_ogg = bool(export_drums_ogg_var.get())
 
             prev_mode = self.model.default_bind_mode
             self.model.set_default_bind_mode(new_bind_mode)
@@ -1698,6 +1731,8 @@ class App:
                         "ffmpeg_path": self.ffmpeg_explicit,
                         "default_bind_mode": self.model.default_bind_mode,
                         "allow_left_remove": self.allow_left_remove,
+                        "export_drums_ogg": self.export_drums_ogg,
+                        "export_four_diffs": bool(self.four_diffs_var.get()),
                         "wav_labels": new_labels,
                     },
                     self.config_path,
@@ -2138,6 +2173,8 @@ class App:
 
     def refresh_tab(self, tab: TabId) -> None:
         self.panels[tab].refresh()
+        if tab == TabId.HH_CLOSE and TabId.LP in self.panels:
+            self.panels[TabId.LP]._refresh_auto_lp_controls()
         self._update_tab_button_styles()
 
     def _on_end_suppress_select(self, _event: Any = None) -> None:
@@ -2718,6 +2755,8 @@ class App:
             wav_labels=dict(self.wav_labels),
             image_mode=self.selected_image_mode(),
             export_bga=bool(self.export_bga_var.get()),
+            export_drums_ogg=bool(self.export_drums_ogg),
+            export_four_diffs=bool(self.four_diffs_var.get()),
         )
         mapping = self.model.to_mapping_config()
         self.set_busy(True)

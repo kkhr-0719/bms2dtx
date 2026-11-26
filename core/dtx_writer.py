@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .constants import (
     DEFAULT_WAV_LABELS,
     DTX_MAX_BPM_SLOTS,
+    FOUR_DIFF_ENTRIES,
     LEGAL_DTX_NOTE_CHANNELS,
     MAX_MEASURE_DIVISIONS,
     QUANTIZE_FALLBACK_DIVISIONS,
@@ -377,6 +378,17 @@ def generate_dtx_text(
 
     lines.append("")
     return "\r\n".join(lines), warnings
+
+
+def generate_set_def_text(chart: BmsChart) -> str:
+    """Generate clean 4-difficulty set.def without any #FONTCOLOR or #L*RGBA overrides."""
+    title = _sanitize_header_value(chart.full_title)
+    lines: List[str] = [f"#TITLE: {title}"]
+    for idx, (fname, label) in enumerate(FOUR_DIFF_ENTRIES, start=1):
+        lines.append(f"#L{idx}FILE: {fname}")
+        lines.append(f"#L{idx}LABEL: {label}")
+    lines.append("")
+    return "\r\n".join(lines)
 
 
 def write_dtx_file(

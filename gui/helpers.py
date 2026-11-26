@@ -32,6 +32,7 @@ from core import (
     build_project_mapping_dict,
     parse_auto_lp_config,
     resolve_auto_bind_wav_id,
+    resolve_auto_lp_wav_id,
 )
 
 from .i18n import tr
@@ -383,8 +384,8 @@ class AssignmentModel:
         self.tab_wavs[tab] = kept
         if self.default_binds.get(tab) in removed:
             del self.default_binds[tab]
-        if tab == TabId.LP and self.auto_lp.chip_mode in removed:
-            self.auto_lp.chip_mode = AUTO_LP_CHIP_NONE
+        if tab in (TabId.LP, TabId.HH_CLOSE) and self.auto_lp.chip_mode in removed:
+            self.auto_lp.chip_mode = AUTO_LP_CHIP_AUTO
         if not kept:
             self.explicit_unbinds.discard(tab)
         return removed
@@ -565,10 +566,13 @@ class AssignmentModel:
         cm_lower = parsed_auto_lp.chip_mode.lower()
         if cm_lower not in (AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_AUTO, AUTO_LP_CHIP_EMPTY_ZZ):
             norm_lp_wid = normalize_wav_id(active_chart, parsed_auto_lp.chip_mode)
-            if norm_lp_wid in new_model.tab_wavs[TabId.LP]:
+            valid_auto_lp_pool = set(new_model.tab_wavs[TabId.LP]) | set(
+                new_model.tab_wavs[TabId.HH_CLOSE]
+            )
+            if norm_lp_wid in valid_auto_lp_pool:
                 parsed_auto_lp.chip_mode = norm_lp_wid
             else:
-                parsed_auto_lp.chip_mode = AUTO_LP_CHIP_NONE
+                parsed_auto_lp.chip_mode = AUTO_LP_CHIP_AUTO
         new_model.auto_lp = parsed_auto_lp
         new_model.swap_lr = bool(data.get("swap_lr", self.swap_lr))
         raw_swapped = data.get("swapped_wav_ids", [])
@@ -737,23 +741,38 @@ def format_tab_row(
 
 def _resolve_auto_chip_for_lp(
     model: AssignmentModel, chart: Optional[BmsChart]
-) -> Optional[str]:
-    """Resolve the representative LP WAV ID that 'Auto' mode selects (if LP Tab is non-empty)."""
+) -> Tuple[Optional[str], Optional[TabId]]:
+    """Resolve the representative WAV ID and source Tab that 'Auto' Auto-LP selects."""
     active_chart = chart if chart is not None else model.chart
     lp_display_ids = model.display_ids_for_tab(TabId.LP, active_chart)
-    if not lp_display_ids:
-        return None
-    lp_orig, _is_auto = model.effective_bind(TabId.LP, active_chart)
-    if lp_orig is None:
-        lp_orig = model.auto_bind_for_tab(TabId.LP, active_chart)
-    if lp_orig is None:
-        return None
+    hhc_display_ids = model.display_ids_for_tab(TabId.HH_CLOSE, active_chart)
+    if not lp_display_ids and not hhc_display_ids:
+        return None, None
+    lp_bound_rep: Optional[str] = None
+    if lp_display_ids:
+        lp_orig, _is_auto = model.effective_bind(TabId.LP, active_chart)
+        if lp_orig is not None:
+            if active_chart is not None:
+                _rep_to_group, wid_to_rep = wav_physical_groups(active_chart)
+                lp_bound_rep = wid_to_rep.get(lp_orig, lp_orig)
+            else:
+                lp_bound_rep = lp_orig
+
+    chosen_wid, src_tab = resolve_auto_lp_wav_id(
+        active_chart,
+        lp_display_ids,
+        hhc_display_ids,
+        lp_bound_orig=lp_bound_rep,
+    )
+    if chosen_wid is None:
+        return None, None
+    pool_ids = lp_display_ids if src_tab == TabId.LP else hhc_display_ids
     if active_chart is not None:
         _rep_to_group, wid_to_rep = wav_physical_groups(active_chart)
-        rep = wid_to_rep.get(lp_orig, lp_orig)
-        if rep in lp_display_ids:
-            return rep
-    return lp_orig if lp_orig in lp_display_ids else lp_display_ids[0]
+        rep = wid_to_rep.get(chosen_wid, chosen_wid)
+        if rep in pool_ids:
+            return rep, src_tab
+    return (chosen_wid if chosen_wid in pool_ids else pool_ids[0]), src_tab
 
 
 def resolve_auto_lp_target_wav_id(
@@ -766,33 +785,38 @@ def resolve_auto_lp_target_wav_id(
     if mode_lower in ("", AUTO_LP_CHIP_NONE, AUTO_LP_CHIP_EMPTY_ZZ):
         return None
     lp_display_ids = model.display_ids_for_tab(TabId.LP, active_chart)
-    if not lp_display_ids:
+    hhc_display_ids = model.display_ids_for_tab(TabId.HH_CLOSE, active_chart)
+    if not lp_display_ids and not hhc_display_ids:
         return None
 
     if mode_lower == AUTO_LP_CHIP_AUTO:
-        return _resolve_auto_chip_for_lp(model, active_chart)
+        wid, _src_tab = _resolve_auto_chip_for_lp(model, active_chart)
+        return wid
 
     cand = normalize_wav_id(active_chart, raw_mode)
-    if cand not in model.tab_wavs[TabId.LP]:
+    in_lp = cand in model.tab_wavs[TabId.LP]
+    in_hhc = cand in model.tab_wavs[TabId.HH_CLOSE]
+    if not (in_lp or in_hhc):
         return None
+    target_display_ids = lp_display_ids if in_lp else hhc_display_ids
     if active_chart is not None:
         _rep_to_group, wid_to_rep = wav_physical_groups(active_chart)
         rep = wid_to_rep.get(cand, cand)
-        if rep in lp_display_ids:
+        if rep in target_display_ids:
             return rep
-    return cand if cand in lp_display_ids else lp_display_ids[0]
+    return cand if cand in target_display_ids else (target_display_ids[0] if target_display_ids else None)
 
 
 def auto_lp_combobox_values(
     model: AssignmentModel, chart: Optional[BmsChart]
 ) -> List[Tuple[str, str]]:
-    """``[(display_text, chip_mode_value)]`` for LP Tab's Auto-LP selector."""
+    """``[(display_text, chip_mode_value)]`` for LP Tab's Auto-LP selector (LP + HH Close pool)."""
     active_chart = chart if chart is not None else model.chart
-    auto_wid = _resolve_auto_chip_for_lp(model, active_chart)
-    if auto_wid is not None:
+    auto_wid, auto_src_tab = _resolve_auto_chip_for_lp(model, active_chart)
+    if auto_wid is not None and auto_src_tab is not None:
         auto_entry = active_chart.wavs.get(auto_wid) if active_chart is not None else None
         auto_label = (
-            f"{tr('auto_lp_chip_auto_prefix')}"
+            f"{tr('auto_lp_chip_auto_prefix')}[{tab_label(auto_src_tab)}] "
             f"{format_tab_row(auto_entry, auto_wid, chart=active_chart)}"
         )
     else:
@@ -802,9 +826,11 @@ def auto_lp_combobox_values(
         (auto_label, AUTO_LP_CHIP_AUTO),
         (tr("auto_lp_chip_empty_zz"), AUTO_LP_CHIP_EMPTY_ZZ),
     ]
-    for wid in model.display_ids_for_tab(TabId.LP, active_chart):
-        entry = active_chart.wavs.get(wid) if active_chart is not None else None
-        values.append((format_tab_row(entry, wid, chart=active_chart), wid))
+    for src_tab in (TabId.LP, TabId.HH_CLOSE):
+        prefix = f"[{tab_label(src_tab)}] "
+        for wid in model.display_ids_for_tab(src_tab, active_chart):
+            entry = active_chart.wavs.get(wid) if active_chart is not None else None
+            values.append((prefix + format_tab_row(entry, wid, chart=active_chart), wid))
     return values
 
 
@@ -957,6 +983,19 @@ def build_result_summary(result: ConversionResult) -> str:
         )
     else:
         lines.append(tr("result_bgm_none"))
+    if result.drums_path is not None and result.drums_mix_stats is not None:
+        dms = result.drums_mix_stats
+        lines.append(
+            tr(
+                "result_drums_line",
+                path=result.drums_path,
+                duration=dms.duration_sec,
+                events=dms.mixed_event_count,
+                peak=dms.peak_after_norm,
+            )
+        )
+    if result.set_def_path is not None:
+        lines.append(tr("result_set_def_line", path=result.set_def_path))
     if result.preview_path is not None:
         lines.append(tr("result_preview_line", path=result.preview_path))
     lines.append(tr("result_placed_notes", count=result.placed_note_count))

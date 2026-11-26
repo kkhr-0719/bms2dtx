@@ -8,6 +8,12 @@ from fractions import Fraction
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
+import wave
+
+try:
+    import soundfile as sf  # type: ignore
+except ImportError:  # pragma: no cover
+    sf = None  # type: ignore
 
 from .constants import (
     AUTO_LP_CHIP_AUTO,
@@ -72,6 +78,125 @@ class MappingPlan:
     hihat_conflict_removals: List[HiHatConflictRemoval] = field(default_factory=list)
     tom_overflow_records: List[TomOverflowRecord] = field(default_factory=list)
     merged_slices: List[MergedSliceSpec] = field(default_factory=list)
+    next_free_slot: int = 2
+    slot_to_canonical_orig: Dict[str, str] = field(default_factory=dict)
+
+
+def get_audio_duration_sec(
+    path: Optional[Path],
+    *,
+    cache: Optional[Dict[str, Optional[float]]] = None,
+) -> Optional[float]:
+    """Return audio duration in seconds via lightweight header inspection (None if missing/unreadable)."""
+    if path is None:
+        return None
+    cache_key = os.path.normcase(os.path.abspath(str(path)))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    dur: Optional[float] = None
+    try:
+        if path.is_file():
+            if sf is not None:
+                try:
+                    info = sf.info(str(path))
+                    if info.samplerate > 0 and info.frames > 0:
+                        dur = float(info.frames) / float(info.samplerate)
+                except Exception:
+                    dur = None
+            if dur is None and path.suffix.lower() == ".wav":
+                try:
+                    with wave.open(str(path), "rb") as wf:
+                        sr = wf.getframerate()
+                        frames = wf.getnframes()
+                        if sr > 0 and frames > 0:
+                            dur = float(frames) / float(sr)
+                except Exception:
+                    dur = None
+    except OSError:
+        dur = None
+    if cache is not None:
+        cache[cache_key] = dur
+    return dur
+
+
+def resolve_auto_lp_wav_id(
+    chart: Optional[BmsChart],
+    lp_wav_ids: Sequence[str],
+    hh_close_wav_ids: Sequence[str] = (),
+    *,
+    lp_bound_orig: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[TabId]]:
+    """Resolve target BMS WAV ID for Auto-LP from LP (preferred) or HH Close (shortest duration fallback).
+
+    Returns ``(wav_id, source_tab)``.
+    """
+    lp_cleaned = [w for w in lp_wav_ids if w]
+    if lp_cleaned:
+        if lp_bound_orig and lp_bound_orig in lp_cleaned:
+            return lp_bound_orig, TabId.LP
+        chosen = resolve_auto_bind_wav_id(chart, lp_cleaned)
+        return (chosen, TabId.LP) if chosen is not None else (None, None)
+
+    hhc_cleaned = [w for w in hh_close_wav_ids if w]
+    if not hhc_cleaned:
+        return None, None
+    if chart is None:
+        return hhc_cleaned[0], TabId.HH_CLOSE
+
+    dur_cache: Optional[Dict[str, Optional[float]]] = getattr(
+        chart, "_audio_duration_cache", None
+    )
+    if dur_cache is None:
+        dur_cache = {}
+        try:
+            setattr(chart, "_audio_duration_cache", dur_cache)
+        except Exception:
+            pass
+
+    phys_groups: Dict[str, List[str]] = defaultdict(list)
+    wid_to_phys: Dict[str, str] = {}
+    for wid, entry in chart.wavs.items():
+        if entry.exists and entry.resolved_path is not None:
+            phys = os.path.normcase(os.path.abspath(str(entry.resolved_path)))
+            phys_groups[phys].append(wid)
+            wid_to_phys[wid] = phys
+
+    best_key: Optional[Tuple[int, float, int, int]] = None
+    best_wid: Optional[str] = None
+    seen_groups: Set[str] = set()
+
+    for idx, wid in enumerate(hhc_cleaned):
+        phys = wid_to_phys.get(wid)
+        gkey = f"P:{phys}" if phys is not None else f"M:{wid}"
+        if gkey in seen_groups:
+            continue
+        seen_groups.add(gkey)
+        entry = chart.wavs.get(wid)
+        dur = (
+            get_audio_duration_sec(entry.resolved_path, cache=dur_cache)
+            if (entry is not None and entry.exists and entry.resolved_path is not None)
+            else None
+        )
+        valid_dur = dur is not None and dur > 0.0
+        members = phys_groups[phys] if phys is not None else [wid]
+        use_score = 0
+        for mwid in dict.fromkeys(members):
+            me = chart.wavs.get(mwid)
+            if me is not None:
+                use_score += me.use_count
+            else:
+                use_score += sum(1 for ev in chart.events if ev.wav_id == mwid)
+        cand_key = (
+            0 if valid_dur else 1,
+            dur if (valid_dur and dur is not None) else float("inf"),
+            -use_score,
+            idx,
+        )
+        if best_key is None or cand_key < best_key:
+            best_key = cand_key
+            best_wid = wid
+
+    return (best_wid, TabId.HH_CLOSE) if best_wid is not None else (None, None)
 
 
 def resolve_auto_bind_wav_id(
@@ -891,21 +1016,29 @@ def build_mapping_plan(
         wav_volumes[AUTO_LP_SILENT_WAV_ID] = 0
         dtx_wav_labels[AUTO_LP_SILENT_WAV_ID] = "LP_GHOST"
     elif mode_lower == AUTO_LP_CHIP_AUTO:
-        lp_orig = bound_orig_by_tab.get(TabId.LP)
-        if lp_orig is None and normalized_tab_wavs[TabId.LP]:
-            lp_orig = resolve_auto_bind_wav_id(chart, normalized_tab_wavs[TabId.LP])
-        if lp_orig is not None and lp_orig in wav_id_map:
-            resolved_lp_orig = slot_to_canonical_orig.get(wav_id_map[lp_orig], lp_orig)
+        resolved_choice, _src_tab = resolve_auto_lp_wav_id(
+            chart,
+            normalized_tab_wavs[TabId.LP],
+            normalized_tab_wavs[TabId.HH_CLOSE],
+            lp_bound_orig=bound_orig_by_tab.get(TabId.LP),
+        )
+        if resolved_choice is not None and resolved_choice in wav_id_map:
+            resolved_lp_orig = slot_to_canonical_orig.get(
+                wav_id_map[resolved_choice], resolved_choice
+            )
     elif mode_lower not in ("", AUTO_LP_CHIP_NONE):
         cand_wid = _norm_wav_id(chart, raw_chip_mode)
-        if cand_wid in wav_id_map and wav_to_tab.get(cand_wid) == TabId.LP:
+        if cand_wid in wav_id_map and wav_to_tab.get(cand_wid) in (
+            TabId.LP,
+            TabId.HH_CLOSE,
+        ):
             resolved_lp_orig = slot_to_canonical_orig.get(wav_id_map[cand_wid], cand_wid)
         else:
             warnings.append(
                 ConversionWarning(
                     code="AUTO_LP_UNMAPPED_CHIP",
                     message=(
-                        f"Auto-LP chip {raw_chip_mode!r} is not mapped to the LP Tab; "
+                        f"Auto-LP chip {raw_chip_mode!r} is not mapped to the LP or HH Close Tab; "
                         f"skipped automatic LP insertion."
                     ),
                 )
@@ -1034,4 +1167,6 @@ def build_mapping_plan(
         hihat_conflict_removals=hihat_conflict_removals,
         tom_overflow_records=tom_overflow_records,
         merged_slices=merged_slices,
+        next_free_slot=next_free_slot,
+        slot_to_canonical_orig=slot_to_canonical_orig,
     )

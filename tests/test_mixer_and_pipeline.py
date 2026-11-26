@@ -1479,6 +1479,130 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertTrue(any(w.code == "MISSING_AUDIO_FILES" for w in res_clip.import_warnings))
             self.assertFalse(any(w.code == "MISSING_AUDIO_FILES" for w in res_clip.export_warnings))
 
+    def test_v060_drums_ogg_stem_tfirst_alignment_se8_and_four_diff_set_def(self) -> None:
+        import numpy as np
+        import soundfile as sf
+        from core.constants import DRUMS_STEM_SE_CHANNEL, DRUMS_STEM_VOLUME, FOUR_DIFF_ENTRIES
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            sr = 44100
+            t = np.arange(int(sr * 0.08), dtype=np.float32) / sr
+
+            # Left-only drum tones (01=kick 120Hz, 02=other 330Hz, 03=guitar 990Hz, 04=hh_open 550Hz, 05=hh_close 770Hz)
+            def _left(freq: float, amp: float = 0.7) -> np.ndarray:
+                return np.column_stack([(amp * np.sin(2 * np.pi * freq * t)).astype(np.float32), np.zeros_like(t)])
+
+            sf.write(str(src / "kick.wav"), _left(120.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "other.wav"), _left(330.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "guitar.wav"), _left(990.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "hho.wav"), _left(550.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "hhc.wav"), _left(770.0), sr, format="WAV", subtype="PCM_16")
+
+            bms = src / "v060_e2e.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE V060;Stem;Test",
+                        "#BPM 120",  # 1 measure = 2.0s
+                        "#WAV01 kick.wav",
+                        "#WAV02 other.wav",
+                        "#WAV03 guitar.wav",
+                        "#WAV04 hho.wav",
+                        "#WAV05 hhc.wav",
+                        # M001 beat 0 (t=2.0s): guitar ONLY (must NOT shift t_first or enter drums.ogg!)
+                        "#00101:0300",
+                        # M002 pos 1/2 (t=5.0s): earliest drum note kick(01) -> t_first = 5.0s!
+                        # Also at M002 pos 1/2: HHO(04) + HHC(05) -> HHC deleted by HH Open conflict (must NOT enter drums.ogg)
+                        "#00211:0001",
+                        "#00218:0004",
+                        "#00212:0005",
+                        # M003 beat 0 (t=6.0s): Other(02) -> relative offset inside drums.ogg = +1.0s!
+                        "#00301:02",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            out = root / "out_v060"
+            res = convert_bms(
+                bms,
+                ConversionOptions(
+                    output_dir=out,
+                    utf8=True,
+                    render_bgm=True,
+                    export_drums_ogg=True,
+                    export_four_diffs=True,
+                ),
+                mapping=MappingConfig(
+                    tab_wavs={
+                        TabId.BD: ["01"],
+                        TabId.OTHER: ["02"],
+                        TabId.GUITAR: ["03"],
+                        TabId.HH_OPEN: ["04"],
+                        TabId.HH_CLOSE: ["05"],
+                    },
+                    # Flip Left->Right ONLY for Other ("02")!
+                    swapped_wav_ids=["02"],
+                    toggle_on=False,
+                ),
+            )
+
+            # 1) Verify drums.ogg exists, placed on SE8 (68) at M002 pos 1/2 with volume 10
+            assert res.drums_path is not None and res.drums_path.is_file()
+            assert res.drums_mix_stats is not None
+            self.assertEqual(res.drums_path.name, "drums.ogg")
+            self.assertEqual(res.drums_mix_stats.mixed_event_count, 3)  # kick(01), hho(04), other(02) — NO guitar, NO deleted hhc!
+
+            drums_slot = next(wid for wid, fn in res.dtx_wav_table if fn == "drums.ogg")
+            self.assertNotIn(drums_slot, ("ZY", "ZZ"))
+            dtx_text = res.dtx_path.read_text(encoding="utf-8")
+            self.assertIn(f"#WAV{drums_slot}: drums.ogg\t;DRUMS", dtx_text)
+            self.assertIn(f"#VOLUME{drums_slot}: {DRUMS_STEM_VOLUME}", dtx_text)
+            self.assertIn(f"#002{DRUMS_STEM_SE_CHANNEL}: 00{drums_slot}", dtx_text)
+
+            # Verify acoustic timing & L/R swap in drums.ogg:
+            # frame 0 (t_first=5.0s) has kick + hho on Left (0), silent Right
+            # +1.0s (44100 frames) has Other("02") flipped to Right (1)
+            stem_audio, _ = sf.read(str(res.drums_path), dtype="float32", always_2d=True)
+            self.assertGreater(float(np.max(np.abs(stem_audio[:1500, 0]))), 0.3)
+            self.assertLess(float(np.max(np.abs(stem_audio[:1500, 1]))), 0.03)
+            idx_other = int(1.0 * sr)
+            self.assertLess(float(np.max(np.abs(stem_audio[idx_other + 50 : idx_other + 1500, 0]))), 0.03)
+            self.assertGreater(float(np.max(np.abs(stem_audio[idx_other + 50 : idx_other + 1500, 1]))), 0.3)
+
+            # 2) Verify 4 identical .dtx files and clean set.def without #FONTCOLOR / #L*RGBA
+            self.assertEqual(len(res.dtx_paths), 4)
+            expected_bytes = res.dtx_paths[0].read_bytes()
+            for (fname, _lbl), actual_path in zip(FOUR_DIFF_ENTRIES, res.dtx_paths):
+                self.assertEqual(actual_path.name, fname)
+                self.assertTrue(actual_path.is_file())
+                self.assertEqual(actual_path.read_bytes(), expected_bytes)
+
+            assert res.set_def_path is not None and res.set_def_path.is_file()
+            set_def_text = res.set_def_path.read_text(encoding="utf-8")
+            self.assertIn("#TITLE: V060；Stem；Test", set_def_text)
+            for idx, (fname, lbl) in enumerate(FOUR_DIFF_ENTRIES, start=1):
+                self.assertIn(f"#L{idx}FILE: {fname}", set_def_text)
+                self.assertIn(f"#L{idx}LABEL: {lbl}", set_def_text)
+            self.assertNotIn("FONTCOLOR", set_def_text.upper())
+            self.assertNotIn("RGBA", set_def_text.upper())
+
+            # 3) Empty drum+other mapping (only Guitar + BGM) -> skips drums.ogg & SE8!
+            out_empty_stem = root / "out_no_drums"
+            res_no_drums = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_empty_stem, export_drums_ogg=True, export_four_diffs=False),
+                mapping=MappingConfig(tab_wavs={TabId.GUITAR: ["03"]}),
+            )
+            self.assertIsNone(res_no_drums.drums_path)
+            self.assertFalse((out_empty_stem / "drums.ogg").exists())
+            self.assertIsNone(res_no_drums.set_def_path)
+            self.assertEqual(len(res_no_drums.dtx_paths), 1)
+            self.assertEqual(res_no_drums.dtx_path.name, "v060_e2e.dtx")
+
 
 if __name__ == "__main__":
     unittest.main()

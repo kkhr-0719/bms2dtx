@@ -17,11 +17,19 @@ from .constants import (
     AUTO_LP_THRESHOLD_NOTE,
     AUTO_LP_VALID_DENOMINATORS,
     CONVERSION_LOG_FILENAME,
+    DRUMS_STEM_FILENAME,
+    DRUMS_STEM_SE_CHANNEL,
+    DRUMS_STEM_SOURCE_CHANNELS,
+    DRUMS_STEM_VOLUME,
+    DTX_MAX_WAV_SLOTS,
+    FOUR_DIFF_ENTRIES,
     PROJECT_MAPPING_FILENAME,
+    SET_DEF_FILENAME,
     TOM_OVERFLOW_SE_CHANNEL,
     TabId,
+    int_to_base36,
 )
-from .dtx_writer import generate_dtx_text, write_dtx_file
+from .dtx_writer import generate_dtx_text, generate_set_def_text, write_dtx_file
 from .mapping import MappingPlan, build_mapping_plan
 from .mixer import (
     materialize_bga,
@@ -30,6 +38,7 @@ from .mixer import (
     materialize_preview_audio,
     materialize_retained_slices,
     render_bgm_ogg,
+    render_drums_stem_ogg,
     write_silent_wav,
 )
 from .models import (
@@ -105,7 +114,7 @@ def build_project_mapping_dict(
     )
     alp = config.auto_lp
     data: Dict[str, Any] = {
-        "version": "0.5.1",
+        "version": "0.6.0",
         "tab_wavs": {t.value: list(ids) for t, ids in src_tabs.items() if ids},
         "default_lane_binds": {t.value: w for t, w in src_binds.items() if w},
         "default_bind_mode": config.default_bind_mode,
@@ -134,6 +143,9 @@ def build_conversion_log_text(
     dtx_encoding: str,
     placed_note_count: int,
     mix_stats: Optional[MixStats],
+    drums_mix_stats: Optional[MixStats] = None,
+    drums_trigger_note: Optional[PlacedDtxNote] = None,
+    set_def_written: bool = False,
     import_warnings: Sequence[ConversionWarning],
     export_warnings: Sequence[ConversionWarning],
     effective_toggle_on: bool,
@@ -148,10 +160,11 @@ def build_conversion_log_text(
     merged_reuse_total = sum(len(spec.occurrences) for spec in plan.merged_slices)
 
     lines: List[str] = [
-        "=== bms2dtx Conversion Log (v0.5.1) ===",
+        "=== bms2dtx Conversion Log (v0.6.0) ===",
         f"Source Chart : {chart.source_path.name}",
         f"Title        : {chart.full_title}",
-        f"Output DTX   : {dtx_name} ({dtx_encoding})",
+        f"Output DTX   : {dtx_name} ({dtx_encoding})"
+        + (" [+ set.def 4-diff]" if set_def_written else ""),
         f"Mode         : {'Toggle = ON' if effective_toggle_on else 'Toggle = OFF (bgm.ogg)'}",
         f"Placed Notes : {placed_note_count}",
         f"Auto-LP Added: {plan.auto_lp_placed_count}",
@@ -161,6 +174,14 @@ def build_conversion_log_text(
             f"bgm.ogg Mix  : {mix_stats.mixed_event_count} events, "
             f"duration={mix_stats.duration_sec:.2f}s, peak={mix_stats.peak_after_norm:.4f}, "
             f"rms={mix_stats.rms:.4f}, gain={mix_stats.gain_applied:.4f}"
+        )
+    if drums_mix_stats is not None and drums_trigger_note is not None:
+        lines.append(
+            f"drums.ogg    : {drums_mix_stats.mixed_event_count} drum/Other events, "
+            f"SE8({DRUMS_STEM_SE_CHANNEL}) @ M{drums_trigger_note.measure:03d} pos={drums_trigger_note.pos}, "
+            f"vol={DRUMS_STEM_VOLUME}, #WAV{drums_trigger_note.dtx_wav_id}, "
+            f"duration={drums_mix_stats.duration_sec:.2f}s, peak={drums_mix_stats.peak_after_norm:.4f}, "
+            f"gain={drums_mix_stats.gain_applied:.4f}"
         )
     lines.extend(
         [
@@ -392,6 +413,9 @@ def convert_bms(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    reserve_drums_ogg = bool(
+        not effective_toggle_on and options.export_drums_ogg and options.render_bgm
+    )
 
     # Materialize retained slice files (copy or transcode .wav -> .ogg)
     orig_to_out_name, copied_files, transcoded_files, mat_warnings = (
@@ -404,6 +428,7 @@ def convert_bms(
             ogg_quality=options.ogg_quality,
             ffmpeg_path=options.ffmpeg_path,
             reserve_bgm_ogg=not effective_toggle_on,
+            reserve_drums_ogg=reserve_drums_ogg,
             swap_lr=options.swap_lr,
             swapped_wav_ids=config.swapped_wav_ids,
         )
@@ -414,6 +439,7 @@ def convert_bms(
 
     # Materialize deduplicated merged drum slices (if any)
     merged_id_to_out_name: Dict[str, str] = {}
+    merged_pcm_by_id: Dict[str, bytes] = {}
     if plan.merged_slices:
         merged_id_to_out_name, merged_wavs, merged_oggs, merge_warnings = (
             materialize_merged_slices(
@@ -427,7 +453,9 @@ def convert_bms(
                 ogg_quality=options.ogg_quality,
                 ffmpeg_path=options.ffmpeg_path,
                 reserve_bgm_ogg=not effective_toggle_on,
+                reserve_drums_ogg=reserve_drums_ogg,
                 decode_cache=local_decode_cache,
+                out_pcm_by_id=merged_pcm_by_id,
             )
         )
         export_warnings.extend(merge_warnings)
@@ -442,6 +470,7 @@ def convert_bms(
         claimed_names,
         copy_files=options.copy_retained_audio,
         reserve_bgm_ogg=not effective_toggle_on,
+        reserve_drums_ogg=reserve_drums_ogg,
         swap_lr=options.swap_lr,
         ffmpeg_path=options.ffmpeg_path,
         ogg_quality=options.ogg_quality,
@@ -467,6 +496,7 @@ def convert_bms(
         image_mode=options.image_mode,
         copy_files=options.copy_retained_audio,
         reserve_bgm_ogg=not effective_toggle_on,
+        reserve_drums_ogg=reserve_drums_ogg,
         ffmpeg_path=options.ffmpeg_path,
     )
     export_warnings.extend(img_warnings)
@@ -488,11 +518,12 @@ def convert_bms(
             claimed_names,
             copy_files=options.copy_retained_audio,
             reserve_bgm_ogg=not effective_toggle_on,
+            reserve_drums_ogg=reserve_drums_ogg,
         )
         export_warnings.extend(bga_warnings)
 
     # Build final DTX #WAVxx table in exact sequential Base-36 order (01..ZX),
-    # then append deduplicated merged slices and reserved Auto-LP ZY / ZZ entries if enabled.
+    # then append deduplicated merged slices, optional drums.ogg, and reserved Auto-LP ZY/ZZ.
     dtx_wav_table: List[Tuple[str, str]] = []
     if not effective_toggle_on:
         dtx_wav_table.append(("01", "bgm.ogg"))
@@ -512,6 +543,67 @@ def convert_bms(
             dtx_wav_table.append((spec.dtx_wav_id, merged_name))
             slot_to_out_name[spec.dtx_wav_id] = merged_name
 
+    dtx_wav_labels_eff = dict(plan.dtx_wav_labels)
+    dtx_wav_volumes_eff = dict(plan.wav_volumes)
+
+    # Render drums.ogg stem (Drum Tab 1..12 + Other Tab 13) in Toggle=OFF if requested
+    drums_path: Optional[Path] = None
+    drums_mix_stats: Optional[MixStats] = None
+    drums_trigger_note: Optional[PlacedDtxNote] = None
+    if reserve_drums_ogg:
+        has_drum_or_other = any(n.channel in DRUMS_STEM_SOURCE_CHANNELS for n in placed_notes)
+        if has_drum_or_other:
+            if plan.next_free_slot > DTX_MAX_WAV_SLOTS:
+                export_warnings.append(
+                    ConversionWarning(
+                        code="DRUMS_STEM_SLOT_EXHAUSTED",
+                        message=(
+                            f"DTX Base-36 capacity ({DTX_MAX_WAV_SLOTS}, 01..ZX) exhausted; "
+                            f"skipped generating drums.ogg."
+                        ),
+                    )
+                )
+            else:
+                candidate_drums_path = output_dir / DRUMS_STEM_FILENAME
+                if candidate_drums_path.resolve() in referenced_src_files:
+                    raise ValueError(
+                        f"Refusing to overwrite original BMS audio file with drums.ogg: {candidate_drums_path}"
+                    )
+                first_note, drums_stats, drums_warnings = render_drums_stem_ogg(
+                    chart,
+                    placed_notes,
+                    candidate_drums_path,
+                    slot_to_canonical_orig=plan.slot_to_canonical_orig,
+                    auto_lp_orig_wav_id=plan.auto_lp_orig_wav_id,
+                    merged_pcm_by_id=merged_pcm_by_id,
+                    wav_volumes=dtx_wav_volumes_eff,
+                    sample_rate=options.sample_rate,
+                    ogg_quality=options.ogg_quality,
+                    ffmpeg_path=options.ffmpeg_path,
+                    decode_cache=local_decode_cache,
+                    swap_lr=options.swap_lr,
+                    swapped_wav_ids=config.swapped_wav_ids,
+                )
+                export_warnings.extend(drums_warnings)
+                if first_note is not None and drums_stats is not None:
+                    drums_dtx_wid = int_to_base36(plan.next_free_slot)
+                    dtx_wav_table.append((drums_dtx_wid, DRUMS_STEM_FILENAME))
+                    slot_to_out_name[drums_dtx_wid] = DRUMS_STEM_FILENAME
+                    dtx_wav_volumes_eff[drums_dtx_wid] = DRUMS_STEM_VOLUME
+                    dtx_wav_labels_eff[drums_dtx_wid] = "DRUMS"
+                    drums_trigger_note = PlacedDtxNote(
+                        measure=first_note.measure,
+                        pos=first_note.pos,
+                        channel=DRUMS_STEM_SE_CHANNEL,
+                        dtx_wav_id=drums_dtx_wid,
+                        original_wav_id=drums_dtx_wid,
+                        time_sec=first_note.time_sec,
+                    )
+                    placed_notes.append(drums_trigger_note)
+                    placed_notes.sort(key=lambda n: (n.measure, n.pos, n.channel))
+                    drums_path = candidate_drums_path
+                    drums_mix_stats = drums_stats
+
     if plan.auto_lp_use_zy and plan.auto_lp_orig_wav_id is not None:
         zy_out = orig_to_out_name.get(plan.auto_lp_orig_wav_id)
         if zy_out is None:
@@ -525,6 +617,8 @@ def convert_bms(
         claimed_lower = {name.replace("\\", "/").lower() for name in claimed_names}
         if not effective_toggle_on:
             claimed_lower.add("bgm.ogg")
+        if reserve_drums_ogg:
+            claimed_lower.add(DRUMS_STEM_FILENAME.lower())
         silent_name = AUTO_LP_SILENT_FILENAME
         if silent_name.lower() in claimed_lower:
             stem = Path(AUTO_LP_SILENT_FILENAME).stem
@@ -562,7 +656,7 @@ def convert_bms(
         )
         export_warnings.extend(mix_warnings)
 
-    # Generate and write .dtx file
+    # Generate and write .dtx file(s) + optional set.def
     dtx_text, writer_warnings = generate_dtx_text(
         chart,
         dtx_wav_table,
@@ -575,18 +669,49 @@ def convert_bms(
         stagefile_filename=stagefile_rel,
         preimage_filename=preimage_rel,
         background_filename=background_rel,
-        dtx_wav_labels=plan.dtx_wav_labels,
+        dtx_wav_labels=dtx_wav_labels_eff,
         wav_labels=options.wav_labels,
-        wav_volumes=plan.wav_volumes,
+        wav_volumes=dtx_wav_volumes_eff,
         bga_headers=bga_headers,
         bga_placed_events=bga_placed_events,
     )
     export_warnings.extend(writer_warnings)
 
-    dtx_encoding, enc_warnings = write_dtx_file(
-        dtx_text, dtx_path, utf8=options.utf8
-    )
-    export_warnings.extend(enc_warnings)
+    dtx_paths: List[Path] = []
+    set_def_path: Optional[Path] = None
+    if options.export_four_diffs:
+        for idx, (diff_fname, _diff_label) in enumerate(FOUR_DIFF_ENTRIES):
+            target_dtx = output_dir / diff_fname
+            if (
+                target_dtx.resolve() == chart.source_path.resolve()
+                or target_dtx.resolve() in referenced_src_files
+            ):
+                raise ValueError(
+                    f"Refusing to overwrite original BMS source file: {target_dtx}"
+                )
+            dtx_encoding, enc_warnings = write_dtx_file(
+                dtx_text, target_dtx, utf8=options.utf8
+            )
+            if idx == 0:
+                export_warnings.extend(enc_warnings)
+            dtx_paths.append(target_dtx)
+        dtx_path = dtx_paths[0]
+        set_def_path = output_dir / SET_DEF_FILENAME
+        if (
+            set_def_path.resolve() == chart.source_path.resolve()
+            or set_def_path.resolve() in referenced_src_files
+        ):
+            raise ValueError(
+                f"Refusing to overwrite original BMS source file: {set_def_path}"
+            )
+        set_def_text = generate_set_def_text(chart)
+        write_dtx_file(set_def_text, set_def_path, utf8=options.utf8)
+    else:
+        dtx_encoding, enc_warnings = write_dtx_file(
+            dtx_text, dtx_path, utf8=options.utf8
+        )
+        export_warnings.extend(enc_warnings)
+        dtx_paths = [dtx_path]
 
     all_warnings: List[ConversionWarning] = import_warnings + export_warnings
 
@@ -609,6 +734,9 @@ def convert_bms(
             dtx_encoding=dtx_encoding,
             placed_note_count=len(placed_notes),
             mix_stats=mix_stats,
+            drums_mix_stats=drums_mix_stats,
+            drums_trigger_note=drums_trigger_note,
+            set_def_written=set_def_path is not None,
             import_warnings=import_warnings,
             export_warnings=export_warnings,
             effective_toggle_on=effective_toggle_on,
@@ -645,6 +773,10 @@ def convert_bms(
         hihat_conflict_removals=plan.hihat_conflict_removals,
         tom_overflow_records=plan.tom_overflow_records,
         merged_slices=plan.merged_slices,
+        drums_path=drums_path,
+        drums_mix_stats=drums_mix_stats,
+        dtx_paths=dtx_paths,
+        set_def_path=set_def_path,
     )
 
 

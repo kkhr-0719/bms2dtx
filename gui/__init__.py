@@ -1,6 +1,6 @@
-"""Desktop GUI (tkinter / ttk) for bms2dtx v0.5.1 (Toggle = OFF only)."""
+"""Desktop GUI (tkinter / ttk) for bms2dtx v0.6.0 (Toggle = OFF only)."""
 
 __all__ = ["APP_NAME", "APP_VERSION"]
 
 APP_NAME = "bms2dtx"
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.6.0"

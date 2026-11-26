@@ -979,11 +979,71 @@ class TestSeAllocatorSlicerCollapseAndOverflow(unittest.TestCase):
             self.assertEqual(plan_freq.auto_lp_orig_wav_id, "04")
             self.assertEqual(plan_freq.auto_lp_placed_count, 1)
 
-            # 3) Empty LP Tab -> safe no-op
+            # 3) Empty LP Tab + HH Close populated -> picks shortest-duration HH Close slice!
+            hhc_short = root / "hhc_short.wav"
+            hhc_long = root / "hhc_long.wav"
+            import wave as _wave
+
+            def _mk_wav(p: Path, frames: int) -> None:
+                with _wave.open(str(p), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(44100)
+                    wf.writeframes(b"\x00\x00" * frames)
+
+            _mk_wav(hhc_long, 8820)   # 200ms
+            _mk_wav(hhc_short, 2205)  # 50ms -> shortest valid duration!
+            bms_hhc = root / "fallback_hhc.bms"
+            bms_hhc.write_text(
+                "\n".join(
+                    [
+                        "#TITLE AutoLpHhcFallback",
+                        "#BPM 120",
+                        "#WAV01 hhc_long.wav",
+                        "#WAV02 hhc_short.wav",
+                        "#WAV03 hho.wav",
+                        # 01 used 3 times, 02 used once -> shortest duration (02) MUST win over frequency!
+                        "#00111:01010102",
+                        # M002: OHH at 0, CHH at 1/8
+                        "#00218:03000000",
+                        "#00211:00010000",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            chart_hhc = parse_bms(bms_hhc)
+            plan_hhc_auto = build_mapping_plan(
+                chart_hhc,
+                MappingConfig(
+                    tab_wavs={TabId.HH_CLOSE: ["01", "02"], TabId.HH_OPEN: ["03"]},
+                    auto_lp=AutoLpConfig(chip_mode=AUTO_LP_CHIP_AUTO, volume=75, use_zy=True),
+                ),
+            )
+            self.assertEqual(plan_hhc_auto.auto_lp_orig_wav_id, "02")
+            self.assertEqual(plan_hhc_auto.auto_lp_placed_count, 1)
+            self.assertEqual(plan_hhc_auto.wav_volumes.get("ZY"), 75)
+            zy_notes = [n for n in plan_hhc_auto.tab_placed_notes if n.channel == "1B" and n.dtx_wav_id == "ZY"]
+            self.assertEqual(len(zy_notes), 1)
+
+            # 3b) Direct HH Close slice selection with use_zy=False reuses original WAV ID directly
+            plan_hhc_reuse = build_mapping_plan(
+                chart_hhc,
+                MappingConfig(
+                    tab_wavs={TabId.HH_CLOSE: ["01", "02"], TabId.HH_OPEN: ["03"]},
+                    auto_lp=AutoLpConfig(chip_mode="01", volume=60, use_zy=False),
+                ),
+            )
+            self.assertEqual(plan_hhc_reuse.auto_lp_orig_wav_id, "01")
+            self.assertEqual(plan_hhc_reuse.auto_lp_placed_count, 1)
+            self.assertNotIn("ZY", plan_hhc_reuse.wav_volumes)
+            lp_reused = [n for n in plan_hhc_reuse.tab_placed_notes if n.channel == "1B"]
+            self.assertEqual(lp_reused[0].dtx_wav_id, plan_hhc_reuse.wav_id_map["01"])
+
+            # 4) Both LP and HH Close empty -> safe no-op
             plan_empty = build_mapping_plan(
                 chart,
                 MappingConfig(
-                    tab_wavs={TabId.HH_CLOSE: ["01"], TabId.HH_OPEN: ["02"]},
+                    tab_wavs={TabId.HH_OPEN: ["02"]},
                     auto_lp=AutoLpConfig(chip_mode=AUTO_LP_CHIP_AUTO, volume=60),
                 ),
             )
