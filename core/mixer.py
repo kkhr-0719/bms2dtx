@@ -24,7 +24,7 @@ from .constants import (
     SUPPORTED_VIDEO_EXTENSIONS,
     int_to_base36,
 )
-from .models import BmsChart, ConversionWarning, MixStats, NoteEvent
+from .models import BmsChart, ConversionWarning, MergedSliceSpec, MixStats, NoteEvent
 
 try:
     import numpy as np  # type: ignore
@@ -1327,6 +1327,208 @@ def materialize_bga(
         bga_placed_events.append((ev.measure, ev.pos, dtx_ch, dtx_bid))
 
     return bga_headers, bga_placed_events, copied_files, warnings
+
+
+def _write_f32_stereo_wav(
+    pcm_bytes: bytes,
+    output_path: Path,
+    *,
+    sample_rate: int,
+) -> None:
+    """Write interleaved stereo float32le PCM bytes to a standard 16-bit PCM WAV file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if sf is not None and np is not None:
+        arr = (
+            np.frombuffer(pcm_bytes, dtype="<f4").reshape(-1, 2)
+            if pcm_bytes
+            else np.zeros((0, 2), dtype=np.float32)
+        )
+        sf.write(str(output_path), arr, int(sample_rate), format="WAV", subtype="PCM_16")
+        return
+
+    arr_f = array.array("f")
+    arr_f.frombytes(pcm_bytes)
+    if sys.byteorder != "little":
+        arr_f.byteswap()
+    pcm16 = array.array("h", [0]) * len(arr_f)
+    for idx, sample in enumerate(arr_f):
+        clamped = max(-1.0, min(1.0, sample))
+        pcm16[idx] = max(-32768, min(32767, int(round(clamped * 32767.0))))
+    if sys.byteorder != "little":
+        pcm16.byteswap()
+    with wave.open(str(output_path), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(int(sample_rate))
+        wf.writeframes(pcm16.tobytes())
+
+
+def materialize_merged_slices(
+    chart: BmsChart,
+    merged_slices: Sequence[MergedSliceSpec],
+    output_dir: Path,
+    claimed_rel_names: Sequence[str],
+    *,
+    sample_rate: int = 44100,
+    transcode_wav_to_ogg: bool = False,
+    copy_files: bool = True,
+    ogg_quality: float = 6.0,
+    ffmpeg_path: Optional[str] = None,
+    reserve_bgm_ogg: bool = True,
+    decode_cache: Optional[Dict[Tuple[Path, int], bytes]] = None,
+) -> Tuple[Dict[str, str], List[Path], List[Path], List[ConversionWarning]]:
+    """Render deduplicated composite WAV/OGG slices for simultaneous multi-hit drum collisions.
+
+    For each unique component set, decodes each slice once (shared cache), applies per-slice
+    effective L/R swap BEFORE mixing, sums linearly in float32, normalizes downward if
+    peak > 0.99, and writes one file per unique combo.
+    """
+    warnings: List[ConversionWarning] = []
+    merged_id_to_out_name: Dict[str, str] = {}
+    written_wav_paths: List[Path] = []
+    written_ogg_paths: List[Path] = []
+
+    if not merged_slices:
+        return merged_id_to_out_name, written_wav_paths, written_ogg_paths, warnings
+
+    claimed_lower: Dict[str, Optional[Path]] = {
+        name.replace("\\", "/").lower(): None for name in claimed_rel_names
+    }
+    if reserve_bgm_ogg:
+        claimed_lower["bgm.ogg"] = None
+
+    ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path)
+    local_cache: Dict[Tuple[Path, int], bytes] = (
+        decode_cache if decode_cache is not None else {}
+    )
+
+    # Pre-decode all unique component files
+    paths_needed: List[Path] = []
+    seen_paths: set[Path] = set()
+    for spec in merged_slices:
+        for orig_wid, _eff_swap, _fname in spec.components:
+            entry = chart.wavs.get(orig_wid)
+            if entry is None or not entry.exists or entry.resolved_path is None:
+                continue
+            rp = entry.resolved_path.resolve()
+            if (rp, sample_rate) not in local_cache and rp not in seen_paths:
+                seen_paths.add(rp)
+                paths_needed.append(rp)
+
+    if paths_needed:
+        max_workers = min(8, os.cpu_count() or 4, len(paths_needed))
+
+        def _decode_worker(p: Path) -> Tuple[Path, Optional[bytes], Optional[str]]:
+            raw, err = _decode_audio_to_f32_bytes(p, ffmpeg_exe, sample_rate)
+            return p, raw, err
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for path, raw, err in executor.map(_decode_worker, paths_needed):
+                if err is not None or raw is None:
+                    warnings.append(
+                        ConversionWarning(
+                            code="AUDIO_DECODE_FAILED",
+                            message=f"Failed to decode merged slice component {path.name}: {err}",
+                        )
+                    )
+                else:
+                    local_cache[(path, sample_rate)] = raw
+
+    ext = ".ogg" if transcode_wav_to_ogg else ".wav"
+    for spec in merged_slices:
+        comp_ids = [c[0] for c in spec.components[:3]]
+        id_tag = "_".join(re.sub(r"[^0-9A-Za-z_-]", "_", cid) for cid in comp_ids)
+        if len(spec.components) > 3:
+            id_tag += f"_etc{len(spec.components) - 3}"
+        rel_candidate = _disambiguate_rel(
+            Path(f"_mix_{spec.dtx_wav_id}_{id_tag}{ext}"),
+            None,
+            claimed_lower,
+            allow_reuse_same_src=False,
+        )
+        rel_str = rel_candidate.as_posix()
+        claimed_lower[rel_str.lower()] = None
+        dtx_rel = rel_str.replace("/", "\\")
+        spec.output_filename = dtx_rel
+        merged_id_to_out_name[spec.dtx_wav_id] = dtx_rel
+
+        # Mix components in float32 stereo after per-slice L/R swap
+        comp_buffers: List[bytes] = []
+        for orig_wid, eff_swap, _fname in spec.components:
+            entry = chart.wavs.get(orig_wid)
+            if entry is None or not entry.exists or entry.resolved_path is None:
+                continue
+            raw = local_cache.get((entry.resolved_path.resolve(), sample_rate))
+            if not raw:
+                continue
+            comp_buffers.append(_swap_f32_stereo_bytes(raw) if eff_swap else raw)
+
+        if not comp_buffers:
+            total_frames = max(1, sample_rate // 100)
+            mix_bytes = b"\x00" * (total_frames * 8)
+            spec.peak_before_norm = 0.0
+            spec.gain_applied = 1.0
+        elif np is not None:
+            arrays = [
+                np.frombuffer(buf, dtype="<f4").reshape(-1, 2) for buf in comp_buffers
+            ]
+            max_frames = max(len(a) for a in arrays)
+            mix = np.zeros((max_frames, 2), dtype=np.float32)
+            for a in arrays:
+                if not np.all(np.isfinite(a)):
+                    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+                mix[: len(a)] += a
+            peak_before = float(np.max(np.abs(mix))) if max_frames > 0 else 0.0
+            gain = 1.0
+            if peak_before > _PEAK_CEILING:
+                gain = _PEAK_CEILING / peak_before
+                mix *= np.float32(gain)
+            spec.peak_before_norm = peak_before
+            spec.gain_applied = gain
+            mix_bytes = np.ascontiguousarray(mix, dtype="<f4").tobytes()
+        else:
+            need_swap = sys.byteorder != "little"
+            py_arrays: List[array.array] = []
+            for buf in comp_buffers:
+                a_py = array.array("f")
+                a_py.frombytes(buf)
+                if need_swap:
+                    a_py.byteswap()
+                py_arrays.append(a_py)
+            total_samples = max((len(a) for a in py_arrays), default=0)
+            mix_py = array.array("f", [0.0]) * total_samples
+            for a_py in py_arrays:
+                for idx, val in enumerate(a_py):
+                    if math.isfinite(val):
+                        mix_py[idx] += val
+            peak_before = max((abs(v) for v in mix_py), default=0.0)
+            gain = 1.0
+            if peak_before > _PEAK_CEILING:
+                gain = _PEAK_CEILING / peak_before
+                for idx in range(total_samples):
+                    mix_py[idx] *= gain
+            spec.peak_before_norm = peak_before
+            spec.gain_applied = gain
+            if need_swap:
+                mix_py.byteswap()
+            mix_bytes = mix_py.tobytes()
+
+        if copy_files:
+            dst_path = (output_dir.resolve() / rel_candidate).resolve()
+            if transcode_wav_to_ogg:
+                _encode_f32_to_ogg(
+                    [mix_bytes],
+                    dst_path,
+                    ffmpeg_exe=ffmpeg_exe,
+                    sample_rate=sample_rate,
+                    ogg_quality=ogg_quality,
+                )
+                written_ogg_paths.append(dst_path)
+            else:
+                _write_f32_stereo_wav(mix_bytes, dst_path, sample_rate=sample_rate)
+                written_wav_paths.append(dst_path)
+
+    return merged_id_to_out_name, written_wav_paths, written_ogg_paths, warnings
 
 
 def write_silent_wav(

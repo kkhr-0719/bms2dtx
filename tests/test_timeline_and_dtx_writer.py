@@ -275,6 +275,32 @@ class TestDtxWriterInvariants(unittest.TestCase):
         self.assertIn("#00104: 01", dtx_text)
         self.assertIn("#00254: 0002", dtx_text)
 
+    def test_dlevel_omitted_by_default_and_mix_wav_label_inherits_base(self) -> None:
+        chart = self._make_chart(
+            "#TITLE NoDlevel\n#PLAYLEVEL 9\n#BPM 140\n#WAV01 a.wav\n#00101:01\n"
+        )
+        dtx_default, _ = generate_dtx_text(
+            chart,
+            dtx_wav_table=[("01", "bgm.ogg"), ("02", "sd_mix.wav")],
+            placed_notes=[PlacedDtxNote(1, Fraction(0), "12", "02", "02")],
+            lane_bind_lines=[],
+            effective_toggle_on=False,
+            dtx_wav_labels={"02": "SD_MIX"},
+            wav_labels={"SD": "Snare"},
+        )
+        self.assertNotIn("#DLEVEL", dtx_default)
+        self.assertIn("#WAV02: sd_mix.wav\t;Snare_MIX", dtx_default)
+
+        dtx_explicit, _ = generate_dtx_text(
+            chart,
+            dtx_wav_table=[("01", "bgm.ogg")],
+            placed_notes=[],
+            lane_bind_lines=[],
+            effective_toggle_on=False,
+            dlevel=450,
+        )
+        self.assertIn("#DLEVEL: 450", dtx_explicit)
+
 
 if __name__ == "__main__":
     unittest.main()

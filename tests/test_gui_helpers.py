@@ -717,11 +717,11 @@ class I18nTests(unittest.TestCase):
                 self.assertTrue(val.strip(), msg=f"{lang}.{k} is empty")
 
         set_language("en")
-        self.assertIn("#DLEVEL", tr("dlevel_label"))
+        self.assertIn("Export Warnings", tr("result_warnings_header", count=0))
         set_language("ja")
-        self.assertIn("#DLEVEL", tr("dlevel_label"))
+        self.assertIn("エクスポート警告", tr("result_warnings_header", count=0))
         set_language("zh_CN")
-        self.assertIn("#DLEVEL", tr("dlevel_label"))
+        self.assertIn("导出警告", tr("result_warnings_header", count=0))
 
     def test_save_and_load_language_and_app_settings(self) -> None:
         from gui.i18n import (
@@ -924,17 +924,19 @@ class AppIntegrationTests(ChartCase):
         cfg_file = self.tmp / "gui_lang.json"
         app.config_path = cfg_file
         app._persist_settings = True
+        self.assertFalse(hasattr(app, "dlevel_label"))
+        self.assertFalse(hasattr(app, "dlevel_var"))
         app.change_language("en")
-        self.assertIn("Drums Level", app.dlevel_label.cget("text"))
+        self.assertIn("Export", app.export_frame.cget("text"))
         self.assertIn("Loaded", app.status_var.get())
         app.change_language("ja")
-        self.assertIn("ドラム難易度", app.dlevel_label.cget("text"))
+        self.assertIn("エクスポート", app.export_frame.cget("text"))
         self.assertIn("読込完了", app.status_var.get())
         from gui.i18n import load_language_preference
 
         self.assertEqual(load_language_preference(cfg_file), "ja")
         app.change_language("zh_CN")
-        self.assertIn("鼓难度", app.dlevel_label.cget("text"))
+        self.assertIn("导出", app.export_frame.cget("text"))
         self.assertIn("已载入", app.status_var.get())
 
     def test_undo_redo_entry_focus_guard_dirty_close_guard_and_drop_filter(self) -> None:
@@ -1063,7 +1065,7 @@ class AppIntegrationTests(ChartCase):
         from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
         from gui.i18n import TRANSLATIONS, get_language, tr
 
-        self.assertEqual(APP_VERSION, "0.5.0")
+        self.assertEqual(APP_VERSION, "0.5.1")
 
         # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
         base_keys = set(TRANSLATIONS["zh_CN"].keys())
@@ -1102,7 +1104,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(loc_present[1], "__bms2dtx.json")
 
         # 3) Verify GUI title bar, TabId.LP header + bottom bar controls, Use ZY / Volume linkage, 1000ms tooltip, Undo/Redo.
-        self.assertTrue(self.root.title().startswith("bms2dtx 0.5.0"))
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.5.1"))
         self.app.model.assign(TabId.LP, ["03"], chart=self.chart)
         self.app._clean_snapshot = self.app.model.snapshot()
         self.app.dirty = False
@@ -1438,7 +1440,7 @@ class AppIntegrationTests(ChartCase):
         except ValueError as exc:
             write_crash_entry(type(exc), exc, exc.__traceback__, context="unit_test", log_path=log_file)
         log_text = log_file.read_text(encoding="utf-8")
-        self.assertIn("bms2dtx 0.5.0", log_text)
+        self.assertIn("bms2dtx 0.5.1", log_text)
         self.assertIn("ValueError: synthetic crash test", log_text)
 
         alerted: list[tuple[Path, str]] = []
@@ -1860,6 +1862,81 @@ class AppIntegrationTests(ChartCase):
         # Left channel had 0.8, Right had 0.0 -> after swap_lr=True and gain=0.25: L~0, R peak ~0.2
         self.assertLess(float(np.max(np.abs(out_arr[:, 0]))), 1e-4)
         self.assertAlmostEqual(float(np.max(np.abs(out_arr[:, 1]))), 0.2, delta=0.02)
+
+    def test_v051_import_warning_badge_above_btn_decoupled_result_summary_and_legacy_json_dlevel_ignored(self) -> None:
+        import core
+        from core.models import ConversionWarning
+        from gui.helpers import build_result_summary, load_mapping_json, summarize_import_warning_tags
+
+        # 1) Legacy mapping JSON carrying old "dlevel" key loads cleanly without error or extra notes
+        legacy_json = self.tmp / "legacy_v050.json"
+        legacy_json.write_text(
+            '{"version": "0.5.0", "dlevel": 9, "tab_wavs": {"SD": ["02"]}}',
+            encoding="utf-8",
+        )
+        notes = load_mapping_json(self.app.model, legacy_json, self.chart)
+        self.assertEqual(notes, [])
+        self.assertEqual(self.app.model.tab_wavs[TabId.SD], ["02"])
+
+        # 2) Build a chart with referenced missing audio & undeclared WAV so import warnings fire
+        warn_dir = self.tmp / "warn_song"
+        warn_dir.mkdir(exist_ok=True)
+        _write_silent_wav(warn_dir / "sd.wav")
+        warn_bms = warn_dir / "warn.bms"
+        warn_bms.write_text(
+            "\n".join(
+                [
+                    "#TITLE WarnImport",
+                    "#BPM 120",
+                    "#WAV02 sd.wav",
+                    "#WAV05 ghost.wav",
+                    "#00112:02FF",
+                    "#00101:05",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        warn_chart = inspect_bms(warn_bms)
+        self.app.apply_chart(warn_chart)
+        self.app.model.assign(TabId.SD, ["02"], chart=warn_chart)
+        self.root.update()
+        expected_summary = summarize_import_warning_tags(warn_chart.warnings)
+        self.assertIn("未声明定义", expected_summary)
+        self.assertIn("缺失音频", expected_summary)
+        self.assertEqual(self.app.warn_summary_label.cget("text"), expected_summary)
+        self.assertEqual(str(self.app.warn_summary_label.cget("fg")).lower(), "#c62828")
+        self.assertEqual(self.app.warn_summary_label.winfo_manager(), "grid")
+        self.assertEqual(self.app.warn_summary_label.grid_info()["row"], 0)
+        self.assertEqual(self.app.warn_btn.grid_info()["row"], 1)
+
+        # 3) build_result_summary separates export warnings from import warnings (never rewrites MISSING_AUDIO_FILES / UNDEFINED_WAV_REFERENCE)
+        out = self.tmp / "decoupled_out"
+        res = core.convert_bms(
+            warn_bms,
+            core.ConversionOptions(output_dir=out, render_bgm=False),
+            mapping=self.app.model.to_mapping_config(),
+        )
+        self.assertTrue(any(w.code == "MISSING_AUDIO_FILES" for w in res.import_warnings))
+        self.assertTrue(any(w.code == "UNDEFINED_WAV_REFERENCE" for w in res.import_warnings))
+        self.assertFalse(any(w.code == "MISSING_AUDIO_FILES" for w in res.export_warnings))
+        self.assertFalse(any(w.code == "UNDEFINED_WAV_REFERENCE" for w in res.export_warnings))
+        summary_text = build_result_summary(res)
+        self.assertIn("导出警告 (0):", summary_text)
+        self.assertIn("无警告。", summary_text)
+        self.assertNotIn("[MISSING_AUDIO_FILES]", summary_text)
+        self.assertNotIn("[UNDEFINED_WAV_REFERENCE]", summary_text)
+        self.assertIn("__bms2dtx_log.txt", summary_text)
+
+        # Verify summarize_import_warning_tags handles multi-category & empty cleanly
+        self.assertEqual(summarize_import_warning_tags([]), "")
+        multi = summarize_import_warning_tags(
+            [
+                ConversionWarning("UNDEFINED_WAV_REFERENCE", "u"),
+                ConversionWarning("STOP_UNSUPPORTED", "s"),
+            ]
+        )
+        self.assertIn("未声明定义", multi)
+        self.assertIn("#STOP", multi)
 
 
 if __name__ == "__main__":
