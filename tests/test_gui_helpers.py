@@ -1050,11 +1050,17 @@ class AppIntegrationTests(ChartCase):
             err.assert_not_called()
         self.assertFalse(app._busy)
         self.assertFalse(app.dirty)  # dirty resets after successful export!
-        self.assertTrue((out / "test.dtx").is_file())
-        text = (out / "test.dtx").read_bytes().decode("cp932")
+        # Default v0.6.0 settings enable 4-diff export + set.def + drums.ogg stem
+        self.assertTrue((out / "__bsc.dtx").is_file())
+        self.assertTrue((out / "__adv.dtx").is_file())
+        self.assertTrue((out / "__extr.dtx").is_file())
+        self.assertTrue((out / "__mstr.dtx").is_file())
+        self.assertTrue((out / "set.def").is_file())
+        self.assertTrue((out / "drums.ogg").is_file())
+        text = (out / "__bsc.dtx").read_bytes().decode("cp932")
         self.assertIn("#DTXC_LANEBINDEDCHIP: 04", text)
         self.assertIn("\t;SD", text)
-        self.assertTrue(shown and "test.dtx" in shown[0])
+        self.assertTrue(shown and "__bsc.dtx" in shown[0])
         self.assertEqual(snapshot(self.bms.parent), before)
 
     def test_v030_version_i18n_load_dir_and_lp_tab_dual_row_undo_redo(self) -> None:
@@ -1065,7 +1071,7 @@ class AppIntegrationTests(ChartCase):
         from gui.helpers import auto_lp_combobox_values, suggest_load_mapping_location
         from gui.i18n import TRANSLATIONS, get_language, tr
 
-        self.assertEqual(APP_VERSION, "0.5.1")
+        self.assertEqual(APP_VERSION, "0.6.0")
 
         # 1) Verify all 3 languages share exact keys and renamed Save JSON As labels.
         base_keys = set(TRANSLATIONS["zh_CN"].keys())
@@ -1076,7 +1082,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(TRANSLATIONS["ja"]["save_map_btn"], "JSONに別名保存...")
         self.assertEqual(self.app.save_map_btn.cget("text"), tr("save_map_btn", lang=get_language()))
 
-        # 2) Verify auto_lp_combobox_values (plain "自动" when LP empty, "[自动] [ID] filename" when populated)
+        # 2) Verify auto_lp_combobox_values (plain "自动" when LP & HH Close empty, "[自动] [LP] [ID] filename" when populated)
         #    and suggest_load_mapping_location.
         combo_vals = auto_lp_combobox_values(self.app.model, self.chart)
         self.assertGreaterEqual(len(combo_vals), 3)
@@ -1085,10 +1091,10 @@ class AppIntegrationTests(ChartCase):
 
         self.app.model.assign(TabId.LP, ["03", "04"], chart=self.chart)
         combo_vals_pop = auto_lp_combobox_values(self.app.model, self.chart)
-        self.assertEqual(combo_vals_pop[1][0], "[自动] [04] other.wav", combo_vals_pop[1])
+        self.assertEqual(combo_vals_pop[1][0], "[自动] [LP] [04] other.wav", combo_vals_pop[1])
         self.app.model.set_bind(TabId.LP, "03")
         combo_vals_bound = auto_lp_combobox_values(self.app.model, self.chart)
-        self.assertEqual(combo_vals_bound[1][0], "[自动] [03] hh_open.wav", combo_vals_bound[1])
+        self.assertEqual(combo_vals_bound[1][0], "[自动] [LP] [03] hh_open.wav", combo_vals_bound[1])
         self.app.model.clear()
 
         out_dir = self.bms.parent / "out_suggest"
@@ -1104,7 +1110,7 @@ class AppIntegrationTests(ChartCase):
         self.assertEqual(loc_present[1], "__bms2dtx.json")
 
         # 3) Verify GUI title bar, TabId.LP header + bottom bar controls, Use ZY / Volume linkage, 1000ms tooltip, Undo/Redo.
-        self.assertTrue(self.root.title().startswith("bms2dtx 0.5.1"))
+        self.assertTrue(self.root.title().startswith("bms2dtx 0.6.0"))
         self.app.model.assign(TabId.LP, ["03"], chart=self.chart)
         self.app._clean_snapshot = self.app.model.snapshot()
         self.app.dirty = False
@@ -1440,7 +1446,7 @@ class AppIntegrationTests(ChartCase):
         except ValueError as exc:
             write_crash_entry(type(exc), exc, exc.__traceback__, context="unit_test", log_path=log_file)
         log_text = log_file.read_text(encoding="utf-8")
-        self.assertIn("bms2dtx 0.5.1", log_text)
+        self.assertIn("bms2dtx 0.6.0", log_text)
         self.assertIn("ValueError: synthetic crash test", log_text)
 
         alerted: list[tuple[Path, str]] = []
@@ -1636,9 +1642,12 @@ class AppIntegrationTests(ChartCase):
 
             chks = _find_checkbuttons(top)
             self.assertTrue(chks)
-            chks[-1].invoke()  # check "allow_left_remove"
-            # Invoke Save & Close (first packed button on the right, or find by command text)
             from gui.i18n import tr
+
+            allow_chk = next(
+                c for c in chks if str(c.cget("text")) == tr("settings_allow_left_remove_chk")
+            )
+            allow_chk.invoke()  # check "allow_left_remove"
 
             def _find_btn(w, label):
                 if hasattr(w, "cget"):
@@ -1937,6 +1946,97 @@ class AppIntegrationTests(ChartCase):
         )
         self.assertIn("未声明定义", multi)
         self.assertIn("#STOP", multi)
+
+    def test_v060_auto_lp_hh_close_pool_sync_settings_defaults_and_four_diff_ui(self) -> None:
+        from core.constants import AUTO_LP_CHIP_AUTO
+        from gui.helpers import auto_lp_combobox_values
+        from gui.i18n import load_app_settings, save_app_settings
+
+        app = self.app
+        # 1) Default settings have export_drums_ogg=True and export_four_diffs=True
+        cfg_file = self.tmp / "v060_settings.json"
+        defaults = load_app_settings(cfg_file)
+        self.assertTrue(defaults["export_drums_ogg"])
+        self.assertTrue(defaults["export_four_diffs"])
+        self.assertTrue(app.export_drums_ogg)
+        self.assertTrue(app.four_diffs_var.get())
+
+        # Persist toggles cleanly
+        app.config_path = cfg_file
+        app._persist_settings = True
+        app.four_diffs_var.set(False)
+        app._on_four_diffs_toggled()
+        save_app_settings({"export_drums_ogg": False}, cfg_file)
+        reloaded = load_app_settings(cfg_file)
+        self.assertFalse(reloaded["export_four_diffs"])
+        self.assertFalse(reloaded["export_drums_ogg"])
+
+        # 2) Assigning to HH Close adds [HH Close] tagged candidate and updates Auto-LP dropdown live
+        app.model.clear()
+        app.model.assign(TabId.HH_CLOSE, ["01", "02"], chart=self.chart)
+        app.refresh_tab(TabId.HH_CLOSE)
+        vals = auto_lp_combobox_values(app.model, self.chart)
+        labels = [lbl for lbl, _val in vals]
+        self.assertTrue(any(lbl.startswith("[自动] [HH Close]") for lbl in labels), labels)
+        self.assertTrue(any(lbl.startswith("[HH Close] [01]") for lbl in labels), labels)
+
+        # Lock Auto-LP directly onto HH Close slice "02", then remove "02" -> falls back safely to Auto!
+        app.model.auto_lp.chip_mode = "02"
+        app.refresh_tab(TabId.LP)
+        lp_panel = app.panels[TabId.LP]
+        self.assertEqual(lp_panel.auto_lp_chip_values[lp_panel.auto_lp_combo.current()], "02")
+        app.model.remove(TabId.HH_CLOSE, ["02"], chart=self.chart)
+        app.refresh_tab(TabId.HH_CLOSE)
+        self.assertEqual(app.model.auto_lp.chip_mode, AUTO_LP_CHIP_AUTO)
+        self.assertEqual(
+            lp_panel.auto_lp_chip_values[lp_panel.auto_lp_combo.current()],
+            AUTO_LP_CHIP_AUTO,
+        )
+
+    def test_v060_pad_square_preimage_setting_ui_i18n_and_compat(self) -> None:
+        import json as _json
+        from core.constants import IMAGE_MODE_KEEP, IMAGE_MODE_NONE
+        from gui.i18n import TRANSLATIONS, load_app_settings
+
+        app = self.app
+        # 1) Default is True in settings and GUI
+        cfg_new = self.tmp / "sq_new.json"
+        self.assertTrue(load_app_settings(cfg_new)["pad_square_preimage"])
+        self.assertTrue(app.pad_square_preimage_var.get())
+
+        # 2) Backward-compatible with legacy settings JSON missing pad_square_preimage
+        cfg_old = self.tmp / "sq_old.json"
+        cfg_old.write_text(_json.dumps({"language": "en", "export_drums_ogg": False}), encoding="utf-8")
+        loaded_old = load_app_settings(cfg_old)
+        self.assertTrue(loaded_old["pad_square_preimage"])
+        self.assertFalse(loaded_old["export_drums_ogg"])
+
+        # 3) Toggling persists cleanly
+        app.config_path = cfg_old
+        app._persist_settings = True
+        app.pad_square_preimage_var.set(False)
+        app._on_pad_square_preimage_toggled()
+        self.assertFalse(load_app_settings(cfg_old)["pad_square_preimage"])
+
+        # 4) Checkbox enables in IMAGE_MODE_KEEP and disables in IMAGE_MODE_NONE
+        app.image_mode_combo.current(2)  # IMAGE_MODE_NONE
+        app._on_image_mode_selected()
+        self.assertEqual(app.selected_image_mode(), IMAGE_MODE_NONE)
+        self.assertTrue(app.pad_square_preimage_chk.instate(["disabled"]))
+        app.image_mode_combo.current(0)  # IMAGE_MODE_KEEP
+        app._on_image_mode_selected()
+        self.assertEqual(app.selected_image_mode(), IMAGE_MODE_KEEP)
+        self.assertTrue(app.pad_square_preimage_chk.instate(["!disabled"]))
+
+        # 5) Trilingual i18n keys present & refresh dynamically
+        for lang_code in ("zh_CN", "en", "ja"):
+            self.assertIn("pad_square_preimage_chk", TRANSLATIONS[lang_code])
+            self.assertIn("pad_square_preimage_tooltip", TRANSLATIONS[lang_code])
+        app.change_language("en")
+        self.assertEqual(
+            str(app.pad_square_preimage_chk.cget("text")),
+            TRANSLATIONS["en"]["pad_square_preimage_chk"],
+        )
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ if _tkdnd_win64.is_dir():
                 _EXTRA_DATAS.append((str(_f), "tkinterdnd2/tkdnd/win-x64"))
 
 EXCLUDES = [
-    "matplotlib", "scipy", "pandas", "PIL", "Pillow", "PyQt5", "PyQt6", "PySide2", "PySide6",
+    "matplotlib", "scipy", "pandas", "PyQt5", "PyQt6", "PySide2", "PySide6",
     "IPython", "jupyter", "notebook", "pytest", "setuptools", "pip", "wheel", "sphinx",
     "numpy.testing", "numpy.f2py", "unittest.mock", "pydoc_data", "test", "tkinter.test",
 ]
@@ -65,6 +65,8 @@ a = Analysis(
         "core.encoding", "core.mapping", "core.mixer", "core.models", "core.parser",
         "core.se_allocator", "core.timeline",
         "gui", "gui.app", "gui.auto_guess", "gui.crash_log", "gui.helpers", "gui.i18n", "gui.preview_player",
+        "PIL", "PIL.Image", "PIL.PngImagePlugin", "PIL.JpegImagePlugin",
+        "PIL.BmpImagePlugin", "PIL.GifImagePlugin", "PIL.WebPImagePlugin",
         "winsound", "numpy", "soundfile", "sounddevice", "soxr", "_cffi_backend",
         "tkinterdnd2", "tkinterdnd2.TkinterDnD",
         *_EXTRA_HIDDEN,

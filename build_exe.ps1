@@ -56,13 +56,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 & $venvPy -c "import tkinter"
 if ($LASTEXITCODE -ne 0) { throw "tkinter must be available to the build venv" }
-& $venvPy -c "import numpy, soundfile, sounddevice, soxr, tkinterdnd2" 2>$null
+& $venvPy -c "import numpy, soundfile, sounddevice, soxr, tkinterdnd2, PIL" 2>$null
 if ($LASTEXITCODE -ne 0) {
     $req = Join-Path $root "requirements.txt"
     if (Test-Path $req) {
         & $venvPy -m pip install -r $req
     } else {
-        & $venvPy -m pip install numpy soundfile sounddevice soxr tkinterdnd2
+        & $venvPy -m pip install numpy soundfile sounddevice soxr tkinterdnd2 Pillow
     }
     if ($LASTEXITCODE -ne 0) { throw "pip install dependencies failed" }
 }

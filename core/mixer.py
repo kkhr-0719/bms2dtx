@@ -17,6 +17,9 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import wave
 
 from .constants import (
+    AUTO_LP_RESONANT_WAV_ID,
+    DRUMS_STEM_FILENAME,
+    DRUMS_STEM_SOURCE_CHANNELS,
     DTX_MAX_WAV_SLOTS,
     IMAGE_MODE_KEEP,
     IMAGE_MODE_NONE,
@@ -24,7 +27,7 @@ from .constants import (
     SUPPORTED_VIDEO_EXTENSIONS,
     int_to_base36,
 )
-from .models import BmsChart, ConversionWarning, MergedSliceSpec, MixStats, NoteEvent
+from .models import BmsChart, ConversionWarning, MergedSliceSpec, MixStats, NoteEvent, PlacedDtxNote
 
 try:
     import numpy as np  # type: ignore
@@ -40,6 +43,11 @@ try:
     import soxr  # type: ignore
 except ImportError:  # pragma: no cover
     soxr = None  # type: ignore
+
+try:
+    from PIL import Image as _PilImage  # type: ignore
+except ImportError:  # pragma: no cover
+    _PilImage = None  # type: ignore
 
 AudioData = Union["np.ndarray", array.array]
 
@@ -838,6 +846,7 @@ def materialize_retained_slices(
     ogg_quality: float = 6.0,
     ffmpeg_path: Optional[str] = None,
     reserve_bgm_ogg: bool = True,
+    reserve_drums_ogg: bool = False,
     swap_lr: bool = False,
     swapped_wav_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[Dict[str, str], List[Path], List[Path], List[ConversionWarning]]:
@@ -856,9 +865,13 @@ def materialize_retained_slices(
     src_to_rel_out: Dict[Path, str] = {}
     claimed_rel_lower: Dict[str, Optional[Path]] = {}
 
-    # Reserve bgm.ogg in Toggle=OFF so no retained slice accidentally overwrites it
+    # Reserve bgm.ogg / drums.ogg in Toggle=OFF so no retained slice accidentally overwrites them
     if reserve_bgm_ogg:
         claimed_rel_lower["bgm.ogg"] = (output_dir / "bgm.ogg").resolve()
+    if reserve_drums_ogg:
+        claimed_rel_lower[DRUMS_STEM_FILENAME.lower()] = (
+            output_dir / DRUMS_STEM_FILENAME
+        ).resolve()
 
     ffmpeg_exe: Optional[str] = None
     transcode_jobs: List[Tuple[Path, Path, bool]] = []
@@ -1015,6 +1028,7 @@ def materialize_preview_audio(
     *,
     copy_files: bool = True,
     reserve_bgm_ogg: bool = True,
+    reserve_drums_ogg: bool = False,
     swap_lr: bool = False,
     ffmpeg_path: Optional[str] = None,
     ogg_quality: float = 6.0,
@@ -1033,6 +1047,8 @@ def materialize_preview_audio(
     }
     if reserve_bgm_ogg:
         claimed_lower["bgm.ogg"] = None
+    if reserve_drums_ogg:
+        claimed_lower[DRUMS_STEM_FILENAME.lower()] = None
 
     rel_candidate = _sanitize_rel_candidate(entry.resolved_name, src_path)
     rel_candidate = _disambiguate_rel(
@@ -1098,14 +1114,72 @@ def _resize_image_ffmpeg(
     return None
 
 
+def _pad_image_to_square_png(src: Path, dst: Path) -> Tuple[bool, Optional[str]]:
+    """Composite non-square image centered at native resolution on pure black 1:1 RGB PNG.
+
+    Returns ``(created_square, error_message)``. If the source is already square
+    (``w == h``), returns ``(False, None)`` without re-encoding.
+    """
+    if _PilImage is None:
+        return False, "Pillow (PIL) is not installed"
+    try:
+        with _PilImage.open(src) as img:
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                return False, f"invalid dimensions {w}x{h}"
+            if w == h:
+                return False, None
+
+            side = max(w, h)
+            offset = ((side - w) // 2, (side - h) // 2)
+            has_alpha = (
+                img.mode in ("RGBA", "LA", "PA", "RGBa", "La")
+                or bool(getattr(img, "has_transparency_data", False))
+                or ("transparency" in img.info)
+            )
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if has_alpha:
+                rgba = img.convert("RGBA")
+                canvas = _PilImage.new("RGBA", (side, side), (0, 0, 0, 255))
+                out_rgb = None
+                try:
+                    canvas.alpha_composite(rgba, dest=offset)
+                    out_rgb = canvas.convert("RGB")
+                    out_rgb.save(str(dst), format="PNG")
+                finally:
+                    rgba.close()
+                    canvas.close()
+                    if out_rgb is not None:
+                        out_rgb.close()
+            else:
+                rgb = img if img.mode == "RGB" else img.convert("RGB")
+                out_rgb = _PilImage.new("RGB", (side, side), (0, 0, 0))
+                try:
+                    out_rgb.paste(rgb, offset)
+                    out_rgb.save(str(dst), format="PNG")
+                finally:
+                    if rgb is not img:
+                        rgb.close()
+                    out_rgb.close()
+            return True, None
+    except Exception as exc:  # noqa: BLE001
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False, str(exc)
+
+
 def materialize_images(
     chart: BmsChart,
     output_dir: Path,
     claimed_rel_names: Sequence[str],
     *,
     image_mode: str = IMAGE_MODE_KEEP,
+    pad_square_preimage: bool = False,
     copy_files: bool = True,
     reserve_bgm_ogg: bool = True,
+    reserve_drums_ogg: bool = False,
     ffmpeg_path: Optional[str] = None,
 ) -> Tuple[
     Optional[str],
@@ -1127,6 +1201,8 @@ def materialize_images(
     }
     if reserve_bgm_ogg:
         claimed_lower["bgm.ogg"] = None
+    if reserve_drums_ogg:
+        claimed_lower[DRUMS_STEM_FILENAME.lower()] = None
 
     ffmpeg_exe: Optional[str] = None
     if mode == IMAGE_MODE_RESIZE and copy_files:
@@ -1180,6 +1256,67 @@ def materialize_images(
         if stage_rel is not None:
             pre_rel = stage_rel
             pre_dst = stage_dst
+            if (
+                pad_square_preimage
+                and chart.stagefile is not None
+                and chart.stagefile.exists
+                and chart.stagefile.resolved_path is not None
+            ):
+                src_stage = chart.stagefile.resolved_path.resolve()
+                if _PilImage is None:
+                    warnings.append(
+                        ConversionWarning(
+                            code="PREIMAGE_SQUARE_PAD_FAILED",
+                            message="Pillow (PIL) is not installed; reused original #STAGEFILE for #PREIMAGE.",
+                        )
+                    )
+                else:
+                    is_non_square = False
+                    inspect_err: Optional[str] = None
+                    try:
+                        with _PilImage.open(src_stage) as probe_img:
+                            pw, ph = probe_img.size
+                            is_non_square = pw != ph and pw > 0 and ph > 0
+                    except Exception as exc:  # noqa: BLE001
+                        inspect_err = str(exc)
+
+                    if inspect_err is not None:
+                        warnings.append(
+                            ConversionWarning(
+                                code="PREIMAGE_SQUARE_PAD_FAILED",
+                                message=(
+                                    f"Failed to inspect {src_stage.name} dimensions; "
+                                    f"reused original for #PREIMAGE ({inspect_err})."
+                                ),
+                            )
+                        )
+                    elif is_non_square:
+                        base_rel = _sanitize_rel_candidate(chart.stagefile.resolved_name, src_stage)
+                        sq_cand = base_rel.with_name(f"{base_rel.stem}_square.png")
+                        sq_cand = _disambiguate_rel(
+                            sq_cand, None, claimed_lower, allow_reuse_same_src=False
+                        )
+                        sq_rel_str = sq_cand.as_posix()
+                        claimed_lower[sq_rel_str.lower()] = None
+                        if copy_files:
+                            sq_dst = _safe_output_dst(output_dir, sq_cand, src_stage)
+                            created, pad_err = _pad_image_to_square_png(src_stage, sq_dst)
+                            if pad_err is not None:
+                                warnings.append(
+                                    ConversionWarning(
+                                        code="PREIMAGE_SQUARE_PAD_FAILED",
+                                        message=(
+                                            f"Failed to pad {src_stage.name} to 1:1 square PNG; "
+                                            f"reused original ({pad_err})."
+                                        ),
+                                    )
+                                )
+                            elif created:
+                                pre_rel = sq_rel_str.replace("/", "\\")
+                                pre_dst = sq_dst
+                        else:
+                            pre_rel = sq_rel_str.replace("/", "\\")
+                            pre_dst = None
         bg_rel, bg_dst = _copy_raw_image(chart.backbmp, "MISSING_BACKBMP", "#BACKBMP")
         return stage_rel, pre_rel, bg_rel, stage_dst, pre_dst, bg_dst, warnings
 
@@ -1234,6 +1371,7 @@ def materialize_bga(
     *,
     copy_files: bool = True,
     reserve_bgm_ogg: bool = True,
+    reserve_drums_ogg: bool = False,
 ) -> Tuple[
     List[Tuple[str, str, str]],
     List[Tuple[int, Fraction, str, str]],
@@ -1250,6 +1388,8 @@ def materialize_bga(
     }
     if reserve_bgm_ogg:
         claimed_lower["bgm.ogg"] = None
+    if reserve_drums_ogg:
+        claimed_lower[DRUMS_STEM_FILENAME.lower()] = None
 
     bga_headers: List[Tuple[str, str, str]] = []
     id_map: Dict[str, Tuple[str, str]] = {}  # orig_bid -> (tag "BMP"|"AVI", dtx_bid)
@@ -1375,7 +1515,9 @@ def materialize_merged_slices(
     ogg_quality: float = 6.0,
     ffmpeg_path: Optional[str] = None,
     reserve_bgm_ogg: bool = True,
+    reserve_drums_ogg: bool = False,
     decode_cache: Optional[Dict[Tuple[Path, int], bytes]] = None,
+    out_pcm_by_id: Optional[Dict[str, bytes]] = None,
 ) -> Tuple[Dict[str, str], List[Path], List[Path], List[ConversionWarning]]:
     """Render deduplicated composite WAV/OGG slices for simultaneous multi-hit drum collisions.
 
@@ -1396,6 +1538,8 @@ def materialize_merged_slices(
     }
     if reserve_bgm_ogg:
         claimed_lower["bgm.ogg"] = None
+    if reserve_drums_ogg:
+        claimed_lower[DRUMS_STEM_FILENAME.lower()] = None
 
     ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path)
     local_cache: Dict[Tuple[Path, int], bytes] = (
@@ -1513,6 +1657,9 @@ def materialize_merged_slices(
                 mix_py.byteswap()
             mix_bytes = mix_py.tobytes()
 
+        if out_pcm_by_id is not None:
+            out_pcm_by_id[spec.dtx_wav_id] = mix_bytes
+
         if copy_files:
             dst_path = (output_dir.resolve() / rel_candidate).resolve()
             if transcode_wav_to_ogg:
@@ -1529,6 +1676,239 @@ def materialize_merged_slices(
                 written_wav_paths.append(dst_path)
 
     return merged_id_to_out_name, written_wav_paths, written_ogg_paths, warnings
+
+
+def render_drums_stem_ogg(
+    chart: BmsChart,
+    placed_notes: Sequence[PlacedDtxNote],
+    output_path: Path,
+    *,
+    slot_to_canonical_orig: Optional[Dict[str, str]] = None,
+    auto_lp_orig_wav_id: Optional[str] = None,
+    merged_pcm_by_id: Optional[Dict[str, bytes]] = None,
+    wav_volumes: Optional[Dict[str, int]] = None,
+    sample_rate: int = 44100,
+    ogg_quality: float = 6.0,
+    ffmpeg_path: Optional[str] = None,
+    decode_cache: Optional[Dict[Tuple[Path, int], bytes]] = None,
+    swap_lr: bool = False,
+    swapped_wav_ids: Optional[Sequence[str]] = None,
+) -> Tuple[Optional[PlacedDtxNote], Optional[MixStats], List[ConversionWarning]]:
+    """Render drums.ogg stem from Drum (Tab 1-12, incl. Tom SE7) + Other (SE6) notes.
+
+    Sample frame 0 aligns strictly with ``t_first`` of the earliest valid drum/Other note.
+    Returns ``(first_note, MixStats, warnings)`` or ``(None, None, warnings)`` when empty.
+    """
+    warnings: List[ConversionWarning] = []
+    ffmpeg_exe = _resolve_ffmpeg_optional(ffmpeg_path)
+    swapped_set = _normalize_swapped_wav_set(chart, swapped_wav_ids)
+    slot_canon = slot_to_canonical_orig or {}
+    merged_pcm = merged_pcm_by_id or {}
+    vols = wav_volumes or {}
+    local_cache: Dict[Tuple[Path, int], bytes] = (
+        decode_cache if decode_cache is not None else {}
+    )
+
+    stem_notes = [n for n in placed_notes if n.channel in DRUMS_STEM_SOURCE_CHANNELS]
+    if not stem_notes:
+        return None, None, warnings
+
+    # Resolve valid audio sources and per-note amplitude gain
+    # Item: (note, buf_key, raw_pcm_or_path, eff_swap, gain_float)
+    candidate_items: List[Tuple[PlacedDtxNote, str, Union[bytes, Path], bool, float]] = []
+    paths_needed: List[Path] = []
+    seen_paths: set[Path] = set()
+    missing_event_count = 0
+
+    for note in stem_notes:
+        vol_pct = vols.get(note.dtx_wav_id, 100)
+        if vol_pct <= 0:
+            continue
+        vol_gain = max(0.0, min(1.0, float(vol_pct) / 100.0))
+
+        if note.dtx_wav_id in merged_pcm:
+            raw_mix = merged_pcm[note.dtx_wav_id]
+            if not raw_mix:
+                continue
+            candidate_items.append((note, f"M:{note.dtx_wav_id}", raw_mix, False, vol_gain))
+            continue
+
+        if note.dtx_wav_id == AUTO_LP_RESONANT_WAV_ID:
+            orig_wid = auto_lp_orig_wav_id or note.original_wav_id
+        else:
+            orig_wid = slot_canon.get(note.dtx_wav_id, note.original_wav_id)
+
+        entry = chart.wavs.get(orig_wid) if orig_wid else None
+        if entry is None or not entry.exists or entry.resolved_path is None:
+            missing_event_count += 1
+            continue
+        rp = entry.resolved_path.resolve()
+        eff_swap = bool(swap_lr) ^ (orig_wid in swapped_set)
+        buf_key = f"F:{rp}:S{int(eff_swap)}"
+        candidate_items.append((note, buf_key, rp, eff_swap, vol_gain))
+        if (rp, sample_rate) not in local_cache and rp not in seen_paths:
+            seen_paths.add(rp)
+            paths_needed.append(rp)
+
+    if not candidate_items:
+        return None, None, warnings
+
+    if paths_needed:
+        max_workers = min(8, os.cpu_count() or 4, len(paths_needed))
+
+        def _decode_worker(p: Path) -> Tuple[Path, Optional[bytes], Optional[str]]:
+            raw, err = _decode_audio_to_f32_bytes(p, ffmpeg_exe, sample_rate)
+            return p, raw, err
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for path, raw, err in executor.map(_decode_worker, paths_needed):
+                if err is not None or raw is None:
+                    warnings.append(
+                        ConversionWarning(
+                            code="AUDIO_DECODE_FAILED",
+                            message=f"Failed to decode drums stem slice {path.name}: {err}",
+                        )
+                    )
+                else:
+                    local_cache[(path, sample_rate)] = raw
+
+    buf_map: Dict[str, bytes] = {}
+    playable_items: List[Tuple[PlacedDtxNote, str, float]] = []
+    for note, buf_key, src_obj, eff_swap, vol_gain in candidate_items:
+        if isinstance(src_obj, bytes):
+            raw = src_obj
+        else:
+            raw_cached = local_cache.get((src_obj, sample_rate))
+            if raw_cached is None:
+                continue
+            if buf_key not in buf_map:
+                buf_map[buf_key] = (
+                    _swap_f32_stereo_bytes(raw_cached) if eff_swap else raw_cached
+                )
+            raw = buf_map[buf_key]
+        if buf_key not in buf_map:
+            buf_map[buf_key] = raw
+        if len(raw) >= 8:
+            playable_items.append((note, buf_key, vol_gain))
+
+    if not playable_items:
+        return None, None, warnings
+
+    first_note = min(
+        playable_items,
+        key=lambda item: (item[0].time_sec, item[0].measure, item[0].pos, item[0].channel),
+    )[0]
+    t_first = first_note.time_sec
+
+    seen_frame_buf: set[Tuple[int, str, float]] = set()
+    scheduled: List[Tuple[int, str, float]] = []
+    max_end_frame = 0
+    for note, buf_key, vol_gain in playable_items:
+        start_frame = max(0, int(round((note.time_sec - t_first) * sample_rate)))
+        dedup_key = (start_frame, buf_key, round(vol_gain, 4))
+        if dedup_key in seen_frame_buf:
+            continue
+        seen_frame_buf.add(dedup_key)
+        flen = len(buf_map[buf_key]) // 8
+        scheduled.append((start_frame, buf_key, vol_gain))
+        end_frame = start_frame + flen
+        if end_frame > max_end_frame:
+            max_end_frame = end_frame
+
+    total_frames = max(max_end_frame, sample_rate // 2)
+    mixed_event_count = len(scheduled)
+
+    if np is not None:
+        arr_map: Dict[str, "np.ndarray"] = {}
+        for bk, raw in buf_map.items():
+            arr = np.frombuffer(raw, dtype="<f4").reshape(-1, 2)
+            if not np.all(np.isfinite(arr)):
+                arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            arr_map[bk] = arr
+        mix = np.zeros((total_frames, 2), dtype=np.float32)
+        for start_frame, bk, vol_gain in scheduled:
+            buf = arr_map[bk]
+            end_frame = min(total_frames, start_frame + len(buf))
+            if end_frame <= start_frame:
+                continue
+            seg = buf[: end_frame - start_frame]
+            if vol_gain < 0.9999:
+                mix[start_frame:end_frame] += seg * np.float32(vol_gain)
+            else:
+                mix[start_frame:end_frame] += seg
+        peak_before = float(np.max(np.abs(mix))) if total_frames > 0 else 0.0
+        gain = 1.0
+        if peak_before > _PEAK_CEILING:
+            gain = _PEAK_CEILING / peak_before
+            mix *= np.float32(gain)
+        peak_after = float(np.max(np.abs(mix))) if total_frames > 0 else 0.0
+        rms = float(np.sqrt(np.mean(mix.astype(np.float64) ** 2))) if total_frames > 0 else 0.0
+        chunk_frames = 262_144
+        pcm_chunks = [
+            np.ascontiguousarray(mix[off : off + chunk_frames], dtype="<f4").tobytes()
+            for off in range(0, total_frames, chunk_frames)
+        ]
+    else:
+        need_swap = sys.byteorder != "little"
+        py_map: Dict[str, array.array] = {}
+        for bk, raw in buf_map.items():
+            a_py = array.array("f")
+            a_py.frombytes(raw)
+            if need_swap:
+                a_py.byteswap()
+            py_map[bk] = a_py
+        total_samples = total_frames * 2
+        mix_py = array.array("f", [0.0]) * total_samples
+        for start_frame, bk, vol_gain in scheduled:
+            buf_py = py_map[bk]
+            start_idx = start_frame * 2
+            count = min(len(buf_py), total_samples - start_idx)
+            for idx in range(count):
+                val = buf_py[idx]
+                if math.isfinite(val):
+                    mix_py[start_idx + idx] += val * vol_gain
+        peak_before = max((abs(v) for v in mix_py), default=0.0)
+        gain = 1.0
+        if peak_before > _PEAK_CEILING:
+            gain = _PEAK_CEILING / peak_before
+            for idx in range(total_samples):
+                mix_py[idx] *= gain
+        peak_after = peak_before * gain
+        rms = (
+            math.sqrt(sum(v * v for v in mix_py) / total_samples)
+            if total_samples > 0
+            else 0.0
+        )
+        if need_swap:
+            mix_py.byteswap()
+        chunk_samples = 524_288
+        pcm_chunks = [
+            mix_py[off : off + chunk_samples].tobytes()
+            for off in range(0, total_samples, chunk_samples)
+        ]
+
+    _encode_f32_to_ogg(
+        pcm_chunks,
+        output_path,
+        ffmpeg_exe=ffmpeg_exe,
+        sample_rate=sample_rate,
+        ogg_quality=ogg_quality,
+    )
+
+    stats = MixStats(
+        output_path=output_path,
+        sample_rate=sample_rate,
+        total_frames=total_frames,
+        duration_sec=total_frames / float(sample_rate),
+        mixed_event_count=mixed_event_count,
+        unique_files_decoded=len(buf_map),
+        missing_event_count=missing_event_count,
+        peak_before_norm=peak_before,
+        peak_after_norm=peak_after,
+        rms=rms,
+        gain_applied=gain,
+    )
+    return first_note, stats, warnings
 
 
 def write_silent_wav(

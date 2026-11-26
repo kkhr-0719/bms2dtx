@@ -100,7 +100,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "auto_lp_play_tooltip": "按当前音量与生效的 L/R 声道状态试听 Auto-LP 目标切片",
         "auto_lp_target_none": "(未启用 Auto-LP)",
         "auto_lp_target_zz": "ZZ _silent_zz.wav (空音)",
-        "auto_lp_target_no_slice": "(LP 轨无可用切片)",
+        "auto_lp_target_no_slice": "(LP / HH Close 轨无可用切片)",
         "auto_lp_mode_note": "音符时值",
         "auto_lp_mode_ms": "ms",
         "auto_lp_tooltip": (
@@ -122,11 +122,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "open_output_btn": "打开输出文件夹",
         "utf8_chk": "导出 UTF-8 编码 (--utf8)",
         "transcode_ogg_chk": "将保留的 .wav 切片自动转码为 .ogg",
+        "four_diffs_chk": "生成四难度底谱与 set.def",
         "dlevel_label": "鼓难度 (#DLEVEL):",
         "image_mode_label": "图片处理:",
         "image_mode_keep": "保持原图直接搬运",
         "image_mode_resize": "适配老版 DTX 尺寸（等比缩放 + 补黑边）",
         "image_mode_none": "不搬运图片",
+        "pad_square_preimage_chk": "非正方形封面自动补黑边 (1:1)",
+        "pad_square_preimage_tooltip": "将非 1:1 的 #STAGEFILE 封面按原分辨率居中补纯黑边生成 1:1 #PREIMAGE（已是正方形则原样复制不重编码）",
         "export_bga_chk": "实验性 BGA 透传",
         "settings_title": "設定 / Settings",
         "settings_general_section": "界面语言",
@@ -142,6 +145,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "settings_labels_section": "#WAVxx 导出行尾 ;LABEL 注释",
         "settings_reset_labels_btn": "恢复默认",
         "settings_allow_left_remove_chk": "允许在左侧 WAV 列表选中后点击「移除」取消轨道分配",
+        "settings_export_drums_ogg_chk": "导出 drums.ogg 鼓组干声 (音量 10)",
         "settings_open_logs_btn": "打开日志目录",
         "settings_save_btn": "保存并关闭",
         "settings_cancel_btn": "取消",
@@ -237,6 +241,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "峰值 {peak:.3f}, RMS {rms:.4f}, 缺失 {missing})"
         ),
         "result_bgm_none": "bgm.ogg: 未生成",
+        "result_drums_line": "drums.ogg: {path} (SE8/通道68, 音量 10, 时长 {duration:.2f}s, 混入 {events} 音符, 峰值 {peak:.3f})",
+        "result_set_def_line": "四难度底谱与 set.def: {path} (__bsc / __adv / __extr / __mstr.dtx)",
         "result_preview_line": "#PREVIEW: {path}",
         "result_placed_notes": "已放置音符: {count}",
         "result_auto_lp_line": "Auto-LP 自动补足: {count} 个音符",
@@ -342,7 +348,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "auto_lp_play_tooltip": "Preview the resolved Auto-LP target slice with current volume and effective L/R swap",
         "auto_lp_target_none": "(Auto-LP disabled)",
         "auto_lp_target_zz": "ZZ _silent_zz.wav (Silent)",
-        "auto_lp_target_no_slice": "(No slice in LP lane)",
+        "auto_lp_target_no_slice": "(No slice in LP / HH Close)",
         "auto_lp_mode_note": "Note Value",
         "auto_lp_mode_ms": "ms",
         "auto_lp_tooltip": (
@@ -365,11 +371,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "open_output_btn": "Open Output Folder",
         "utf8_chk": "Export UTF-8 encoding (--utf8)",
         "transcode_ogg_chk": "Transcode retained .wav slices to .ogg",
+        "four_diffs_chk": "Generate 4-difficulty DTX + set.def",
         "dlevel_label": "Drums Level (#DLEVEL):",
         "image_mode_label": "Images:",
         "image_mode_keep": "Keep original images",
         "image_mode_resize": "Resize for legacy DTX (pad to 204×269 / 640×480)",
         "image_mode_none": "Do not copy images",
+        "pad_square_preimage_chk": "Auto-pad non-square cover to 1:1",
+        "pad_square_preimage_tooltip": "Pad non-square #STAGEFILE covers with pure black borders at native resolution for 1:1 #PREIMAGE (copies already-square covers verbatim)",
         "export_bga_chk": "Experimental BGA passthrough",
         "settings_title": "Settings / 設定",
         "settings_general_section": "Language",
@@ -385,6 +394,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "settings_labels_section": "#WAVxx Export Inline ;LABEL Comments",
         "settings_reset_labels_btn": "Reset Defaults",
         "settings_allow_left_remove_chk": "Allow removing lane assignments from left WAV list selection",
+        "settings_export_drums_ogg_chk": "Export drums.ogg drum stem (Vol 10)",
         "settings_open_logs_btn": "Open Logs",
         "settings_save_btn": "Save & Close",
         "settings_cancel_btn": "Cancel",
@@ -481,6 +491,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "peak {peak:.3f}, RMS {rms:.4f}, missing {missing})"
         ),
         "result_bgm_none": "bgm.ogg: Not generated",
+        "result_drums_line": "drums.ogg: {path} (SE8/ch 68, Vol 10, duration {duration:.2f}s, events {events}, peak {peak:.3f})",
+        "result_set_def_line": "4-difficulty set.def: {path} (__bsc / __adv / __extr / __mstr.dtx)",
         "result_preview_line": "#PREVIEW: {path}",
         "result_placed_notes": "Placed notes: {count}",
         "result_auto_lp_line": "Auto-LP inserted: {count} note(s)",
@@ -586,7 +598,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "auto_lp_play_tooltip": "現在の音量と有効な L/R 反転設定で Auto-LP 対象スライスを試聴します",
         "auto_lp_target_none": "(Auto-LP 無効)",
         "auto_lp_target_zz": "ZZ _silent_zz.wav (無音)",
-        "auto_lp_target_no_slice": "(LP トラックにスライスなし)",
+        "auto_lp_target_no_slice": "(LP / HH Close トラックにスライスなし)",
         "auto_lp_mode_note": "音符長",
         "auto_lp_mode_ms": "ms",
         "auto_lp_tooltip": (
@@ -609,11 +621,14 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "open_output_btn": "出力フォルダを開く",
         "utf8_chk": "UTF-8 で出力 (--utf8)",
         "transcode_ogg_chk": "保持した .wav スライスを .ogg に自動変換",
+        "four_diffs_chk": "4難易度ベース譜面と set.def を生成",
         "dlevel_label": "ドラム難易度 (#DLEVEL):",
         "image_mode_label": "画像処理:",
         "image_mode_keep": "元画像をそのままコピー",
         "image_mode_resize": "旧DTXサイズ変換（比率維持＋黒帯）",
         "image_mode_none": "画像をコピーしない",
+        "pad_square_preimage_chk": "非正方形ジャケットに自動黒帯追加 (1:1)",
+        "pad_square_preimage_tooltip": "非正方形の #STAGEFILE を元解像度のまま中央配置＋純黒余白で 1:1 の #PREIMAGE PNG に出力（正方形は再エンコードせずコピー）",
         "export_bga_chk": "実験的 BGA パススルー",
         "settings_title": "設定 / Settings",
         "settings_general_section": "表示言語",
@@ -629,6 +644,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "settings_labels_section": "#WAVxx エクスポート行末 ;LABEL コメント",
         "settings_reset_labels_btn": "初期値に戻す",
         "settings_allow_left_remove_chk": "左側 WAV リストの選択から「削除」で割当解除を許可する",
+        "settings_export_drums_ogg_chk": "drums.ogg ドラムステムを出力 (音量 10)",
         "settings_open_logs_btn": "ログフォルダを開く",
         "settings_save_btn": "保存して閉じる",
         "settings_cancel_btn": "キャンセル",
@@ -724,6 +740,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
             "ピーク {peak:.3f}, RMS {rms:.4f}, 欠損 {missing})"
         ),
         "result_bgm_none": "bgm.ogg: 未生成",
+        "result_drums_line": "drums.ogg: {path} (SE8/ch 68, 音量 10, 長さ {duration:.2f}s, ミックスノーツ {events}, ピーク {peak:.3f})",
+        "result_set_def_line": "4難易度 set.def: {path} (__bsc / __adv / __extr / __mstr.dtx)",
         "result_preview_line": "#PREVIEW: {path}",
         "result_placed_notes": "配置ノーツ数: {count}",
         "result_auto_lp_line": "Auto-LP 自動補足: {count} ノーツ",
@@ -798,6 +816,9 @@ def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any
         "default_bind_mode": "auto",
         "swap_lr": False,
         "allow_left_remove": False,
+        "export_drums_ogg": True,
+        "export_four_diffs": True,
+        "pad_square_preimage": True,
         "wav_labels": dict(DEFAULT_WAV_LABELS),
     }
     target = Path(config_path) if config_path is not None else get_default_config_path()
@@ -816,6 +837,12 @@ def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any
                     settings["default_bind_mode"] = bind_mode
                 if "allow_left_remove" in data:
                     settings["allow_left_remove"] = bool(data["allow_left_remove"])
+                if "export_drums_ogg" in data:
+                    settings["export_drums_ogg"] = bool(data["export_drums_ogg"])
+                if "export_four_diffs" in data:
+                    settings["export_four_diffs"] = bool(data["export_four_diffs"])
+                if "pad_square_preimage" in data:
+                    settings["pad_square_preimage"] = bool(data["pad_square_preimage"])
                 raw_labels = data.get("wav_labels")
                 if isinstance(raw_labels, dict):
                     merged = dict(DEFAULT_WAV_LABELS)
@@ -859,6 +886,12 @@ def save_app_settings(
                 existing["ffmpeg_path"] = str(v).strip() if v else None
             elif k == "allow_left_remove":
                 existing["allow_left_remove"] = bool(v)
+            elif k == "export_drums_ogg":
+                existing["export_drums_ogg"] = bool(v)
+            elif k == "export_four_diffs":
+                existing["export_four_diffs"] = bool(v)
+            elif k == "pad_square_preimage":
+                existing["pad_square_preimage"] = bool(v)
             elif k == "swap_lr":
                 continue
             else:

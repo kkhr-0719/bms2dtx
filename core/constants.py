@@ -28,6 +28,16 @@ AUTO_LP_VALID_DENOMINATORS: Tuple[int, ...] = (2, 4, 6, 8, 12, 16)
 
 PROJECT_MAPPING_FILENAME = "__bms2dtx.json"
 CONVERSION_LOG_FILENAME = "__bms2dtx_log.txt"
+DRUMS_STEM_FILENAME = "drums.ogg"
+DRUMS_STEM_SE_CHANNEL = "68"  # SE8 (strictly isolated from SE1..5, SE6, SE7, SE11..14)
+DRUMS_STEM_VOLUME = 10
+SET_DEF_FILENAME = "set.def"
+FOUR_DIFF_ENTRIES: Tuple[Tuple[str, str], ...] = (
+    ("__bsc.dtx", "BASIC"),
+    ("__adv.dtx", "ADVANCED"),
+    ("__extr.dtx", "EXTREME"),
+    ("__mstr.dtx", "MASTER"),
+)
 
 DTX_MAX_BASE36_ID = 1295  # 00..ZZ
 DTX_MAX_WAV_SLOTS = 1293  # 01..ZX (ZY & ZZ permanently reserved for Auto-LP)
@@ -181,6 +191,10 @@ COLLAPSE_BACKUP_CHANNELS: Tuple[str, ...] = (
 
 DRUM_DTX_CHANNELS: Tuple[str, ...] = (
     "11", "12", "13", "14", "15", "16", "17", "18", "19", "1A", "1B", "1C",
+)
+
+DRUMS_STEM_SOURCE_CHANNELS: frozenset[str] = frozenset(
+    DRUM_DTX_CHANNELS + (OTHER_SE_CHANNEL, TOM_OVERFLOW_SE_CHANNEL)
 )
 
 LEGAL_DTX_NOTE_CHANNELS: frozenset[str] = frozenset(

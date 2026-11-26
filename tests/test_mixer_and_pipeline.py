@@ -1479,6 +1479,339 @@ class TestMixerAndPipeline(unittest.TestCase):
             self.assertTrue(any(w.code == "MISSING_AUDIO_FILES" for w in res_clip.import_warnings))
             self.assertFalse(any(w.code == "MISSING_AUDIO_FILES" for w in res_clip.export_warnings))
 
+    def test_v060_drums_ogg_stem_tfirst_alignment_se8_and_four_diff_set_def(self) -> None:
+        import numpy as np
+        import soundfile as sf
+        from core.constants import DRUMS_STEM_SE_CHANNEL, DRUMS_STEM_VOLUME, FOUR_DIFF_ENTRIES
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            sr = 44100
+            t = np.arange(int(sr * 0.08), dtype=np.float32) / sr
+
+            # Left-only drum tones (01=kick 120Hz, 02=other 330Hz, 03=guitar 990Hz, 04=hh_open 550Hz, 05=hh_close 770Hz)
+            def _left(freq: float, amp: float = 0.7) -> np.ndarray:
+                return np.column_stack([(amp * np.sin(2 * np.pi * freq * t)).astype(np.float32), np.zeros_like(t)])
+
+            sf.write(str(src / "kick.wav"), _left(120.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "other.wav"), _left(330.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "guitar.wav"), _left(990.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "hho.wav"), _left(550.0), sr, format="WAV", subtype="PCM_16")
+            sf.write(str(src / "hhc.wav"), _left(770.0), sr, format="WAV", subtype="PCM_16")
+
+            bms = src / "v060_e2e.bms"
+            bms.write_text(
+                "\n".join(
+                    [
+                        "#TITLE V060;Stem;Test",
+                        "#BPM 120",  # 1 measure = 2.0s
+                        "#WAV01 kick.wav",
+                        "#WAV02 other.wav",
+                        "#WAV03 guitar.wav",
+                        "#WAV04 hho.wav",
+                        "#WAV05 hhc.wav",
+                        # M001 beat 0 (t=2.0s): guitar ONLY (must NOT shift t_first or enter drums.ogg!)
+                        "#00101:0300",
+                        # M002 pos 1/2 (t=5.0s): earliest drum note kick(01) -> t_first = 5.0s!
+                        # Also at M002 pos 1/2: HHO(04) + HHC(05) -> HHC deleted by HH Open conflict (must NOT enter drums.ogg)
+                        "#00211:0001",
+                        "#00218:0004",
+                        "#00212:0005",
+                        # M003 beat 0 (t=6.0s): Other(02) -> relative offset inside drums.ogg = +1.0s!
+                        "#00301:02",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            out = root / "out_v060"
+            res = convert_bms(
+                bms,
+                ConversionOptions(
+                    output_dir=out,
+                    utf8=True,
+                    render_bgm=True,
+                    export_drums_ogg=True,
+                    export_four_diffs=True,
+                ),
+                mapping=MappingConfig(
+                    tab_wavs={
+                        TabId.BD: ["01"],
+                        TabId.OTHER: ["02"],
+                        TabId.GUITAR: ["03"],
+                        TabId.HH_OPEN: ["04"],
+                        TabId.HH_CLOSE: ["05"],
+                    },
+                    # Flip Left->Right ONLY for Other ("02")!
+                    swapped_wav_ids=["02"],
+                    toggle_on=False,
+                ),
+            )
+
+            # 1) Verify drums.ogg exists, placed on SE8 (68) at M002 pos 1/2 with volume 10
+            assert res.drums_path is not None and res.drums_path.is_file()
+            assert res.drums_mix_stats is not None
+            self.assertEqual(res.drums_path.name, "drums.ogg")
+            self.assertEqual(res.drums_mix_stats.mixed_event_count, 3)  # kick(01), hho(04), other(02) — NO guitar, NO deleted hhc!
+
+            drums_slot = next(wid for wid, fn in res.dtx_wav_table if fn == "drums.ogg")
+            self.assertNotIn(drums_slot, ("ZY", "ZZ"))
+            dtx_text = res.dtx_path.read_text(encoding="utf-8")
+            self.assertIn(f"#WAV{drums_slot}: drums.ogg\t;DRUMS", dtx_text)
+            self.assertIn(f"#VOLUME{drums_slot}: {DRUMS_STEM_VOLUME}", dtx_text)
+            self.assertIn(f"#002{DRUMS_STEM_SE_CHANNEL}: 00{drums_slot}", dtx_text)
+
+            # Verify acoustic timing & L/R swap in drums.ogg:
+            # frame 0 (t_first=5.0s) has kick + hho on Left (0), silent Right
+            # +1.0s (44100 frames) has Other("02") flipped to Right (1)
+            stem_audio, _ = sf.read(str(res.drums_path), dtype="float32", always_2d=True)
+            self.assertGreater(float(np.max(np.abs(stem_audio[:1500, 0]))), 0.3)
+            self.assertLess(float(np.max(np.abs(stem_audio[:1500, 1]))), 0.03)
+            idx_other = int(1.0 * sr)
+            self.assertLess(float(np.max(np.abs(stem_audio[idx_other + 50 : idx_other + 1500, 0]))), 0.03)
+            self.assertGreater(float(np.max(np.abs(stem_audio[idx_other + 50 : idx_other + 1500, 1]))), 0.3)
+
+            # 2) Verify 4 identical .dtx files and clean set.def without #FONTCOLOR / #L*RGBA
+            self.assertEqual(len(res.dtx_paths), 4)
+            expected_bytes = res.dtx_paths[0].read_bytes()
+            for (fname, _lbl), actual_path in zip(FOUR_DIFF_ENTRIES, res.dtx_paths):
+                self.assertEqual(actual_path.name, fname)
+                self.assertTrue(actual_path.is_file())
+                self.assertEqual(actual_path.read_bytes(), expected_bytes)
+
+            assert res.set_def_path is not None and res.set_def_path.is_file()
+            set_def_text = res.set_def_path.read_text(encoding="utf-8")
+            self.assertIn("#TITLE: V060；Stem；Test", set_def_text)
+            for idx, (fname, lbl) in enumerate(FOUR_DIFF_ENTRIES, start=1):
+                self.assertIn(f"#L{idx}FILE: {fname}", set_def_text)
+                self.assertIn(f"#L{idx}LABEL: {lbl}", set_def_text)
+            self.assertNotIn("FONTCOLOR", set_def_text.upper())
+            self.assertNotIn("RGBA", set_def_text.upper())
+
+            # 3) Empty drum+other mapping (only Guitar + BGM) -> skips drums.ogg & SE8!
+            out_empty_stem = root / "out_no_drums"
+            res_no_drums = convert_bms(
+                bms,
+                ConversionOptions(output_dir=out_empty_stem, export_drums_ogg=True, export_four_diffs=False),
+                mapping=MappingConfig(tab_wavs={TabId.GUITAR: ["03"]}),
+            )
+            self.assertIsNone(res_no_drums.drums_path)
+            self.assertFalse((out_empty_stem / "drums.ogg").exists())
+            self.assertIsNone(res_no_drums.set_def_path)
+            self.assertEqual(len(res_no_drums.dtx_paths), 1)
+            self.assertEqual(res_no_drums.dtx_path.name, "v060_e2e.dtx")
+
+    def test_v060_square_preimage_letterbox_rgb_alpha_passthrough_and_four_diffs(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            # 1) Already-square 64x64 cover -> copied verbatim with NO re-encoding
+            src_sq = root / "src_sq"
+            src_sq.mkdir()
+            _write_sine_wav(src_sq / "bd.wav", 100.0, 0.05)
+            with Image.new("RGB", (64, 64), (18, 120, 210)) as img:
+                img.putpixel((10, 12), (240, 30, 60))
+                img.save(src_sq / "sq.jpg", format="JPEG", quality=92)
+            orig_sq_bytes = (src_sq / "sq.jpg").read_bytes()
+            bms_sq = src_sq / "sq.bms"
+            bms_sq.write_text(
+                "#TITLE SquareExact\n#BPM 120\n#STAGEFILE sq.jpg\n#WAV01 bd.wav\n#00101:01\n",
+                encoding="utf-8",
+            )
+            snap_sq = _dir_snapshot(src_sq)
+            out_sq = root / "out_sq"
+            res_sq = convert_bms(
+                bms_sq,
+                ConversionOptions(
+                    output_dir=out_sq,
+                    render_bgm=False,
+                    image_mode="keep",
+                    pad_square_preimage=True,
+                ),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            self.assertEqual(_dir_snapshot(src_sq), snap_sq)
+            self.assertFalse((out_sq / "sq_square.png").exists())
+            self.assertEqual((out_sq / "sq.jpg").read_bytes(), orig_sq_bytes)
+            dtx_sq = res_sq.dtx_path.read_text(encoding="cp932")
+            self.assertIn("#STAGEFILE: sq.jpg", dtx_sq)
+            self.assertIn("#PREIMAGE: sq.jpg", dtx_sq)
+
+            # 2) Landscape RGB (120x80) -> 120x120 pure black letterbox, unscaled centered pixels
+            src_wide = root / "src_wide"
+            src_wide.mkdir()
+            _write_sine_wav(src_wide / "bd.wav", 100.0, 0.05)
+            with Image.new("RGB", (120, 80), (25, 160, 75)) as img:
+                img.putpixel((0, 0), (250, 10, 20))
+                img.putpixel((119, 79), (15, 220, 240))
+                img.save(src_wide / "wide.png", format="PNG")
+            bms_wide = src_wide / "wide.bms"
+            bms_wide.write_text(
+                "#TITLE WideCover\n#BPM 120\n#STAGEFILE wide.png\n#WAV01 bd.wav\n#00101:01\n",
+                encoding="utf-8",
+            )
+            out_wide = root / "out_wide"
+            res_wide = convert_bms(
+                bms_wide,
+                ConversionOptions(
+                    output_dir=out_wide,
+                    render_bgm=False,
+                    image_mode="keep",
+                    pad_square_preimage=True,
+                ),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            sq_wide_path = out_wide / "wide_square.png"
+            self.assertTrue(sq_wide_path.is_file())
+            assert res_wide.preimage_path is not None
+            self.assertEqual(res_wide.preimage_path.resolve(), sq_wide_path.resolve())
+            with Image.open(sq_wide_path) as padded:
+                self.assertEqual(padded.size, (120, 120))
+                self.assertEqual(padded.mode, "RGB")
+                # Top & bottom pure black bars (20 px each)
+                self.assertEqual(padded.getpixel((0, 0)), (0, 0, 0))
+                self.assertEqual(padded.getpixel((60, 19)), (0, 0, 0))
+                self.assertEqual(padded.getpixel((60, 100)), (0, 0, 0))
+                self.assertEqual(padded.getpixel((119, 119)), (0, 0, 0))
+                # Unscaled native pixels centered at (0, 20)
+                self.assertEqual(padded.getpixel((0, 20)), (250, 10, 20))
+                self.assertEqual(padded.getpixel((119, 99)), (15, 220, 240))
+                self.assertEqual(padded.getpixel((50, 50)), (25, 160, 75))
+            dtx_wide = res_wide.dtx_path.read_text(encoding="cp932")
+            self.assertIn("#STAGEFILE: wide.png", dtx_wide)
+            self.assertIn("#PREIMAGE: wide_square.png", dtx_wide)
+            self.assertIn("Preimage 1:1 : wide_square.png", res_wide.log_path.read_text(encoding="utf-8"))
+
+            # Toggle OFF disables square generation
+            out_wide_off = root / "out_wide_off"
+            res_wide_off = convert_bms(
+                bms_wide,
+                ConversionOptions(
+                    output_dir=out_wide_off,
+                    render_bgm=False,
+                    image_mode="keep",
+                    pad_square_preimage=False,
+                ),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            self.assertFalse((out_wide_off / "wide_square.png").exists())
+            self.assertIn("#PREIMAGE: wide.png", res_wide_off.dtx_path.read_text(encoding="cp932"))
+
+            # 3) Portrait RGB (60x100) + 4-difficulty mode -> all 4 .dtx point #PREIMAGE to tall_square.png
+            src_tall = root / "src_tall"
+            src_tall.mkdir()
+            _write_sine_wav(src_tall / "bd.wav", 100.0, 0.05)
+            with Image.new("RGB", (60, 100), (40, 80, 190)) as img:
+                img.putpixel((0, 0), (200, 180, 10))
+                img.putpixel((59, 99), (10, 250, 120))
+                img.save(src_tall / "tall.png", format="PNG")
+            bms_tall = src_tall / "tall.bms"
+            bms_tall.write_text(
+                "#TITLE TallCover\n#BPM 120\n#STAGEFILE tall.png\n#WAV01 bd.wav\n#00101:01\n",
+                encoding="utf-8",
+            )
+            out_tall = root / "out_tall"
+            res_tall = convert_bms(
+                bms_tall,
+                ConversionOptions(
+                    output_dir=out_tall,
+                    render_bgm=False,
+                    image_mode="keep",
+                    pad_square_preimage=True,
+                    export_four_diffs=True,
+                ),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            with Image.open(out_tall / "tall_square.png") as padded_t:
+                self.assertEqual(padded_t.size, (100, 100))
+                self.assertEqual(padded_t.mode, "RGB")
+                self.assertEqual(padded_t.getpixel((19, 50)), (0, 0, 0))
+                self.assertEqual(padded_t.getpixel((80, 50)), (0, 0, 0))
+                self.assertEqual(padded_t.getpixel((20, 0)), (200, 180, 10))
+                self.assertEqual(padded_t.getpixel((79, 99)), (10, 250, 120))
+            self.assertEqual(len(res_tall.dtx_paths), 4)
+            for p_diff in res_tall.dtx_paths:
+                txt = p_diff.read_text(encoding="cp932")
+                self.assertIn("#PREIMAGE: tall_square.png", txt)
+                self.assertIn("#STAGEFILE: tall.png", txt)
+
+            # 4) Alpha modes (RGBA, LA, P with transparency) -> pure black composite without white fringe
+            # 4a) RGBA (80x40)
+            src_rgba = root / "src_rgba"
+            src_rgba.mkdir()
+            _write_sine_wav(src_rgba / "bd.wav", 100.0, 0.05)
+            with Image.new("RGBA", (80, 40), (255, 255, 255, 0)) as img:
+                img.putpixel((0, 0), (255, 100, 50, 128))
+                img.putpixel((40, 20), (20, 200, 90, 255))
+                img.save(src_rgba / "alpha_rgba.png", format="PNG")
+            (src_rgba / "c.bms").write_text(
+                "#TITLE RgbaAlpha\n#BPM 120\n#STAGEFILE alpha_rgba.png\n#WAV01 bd.wav\n#00101:01\n",
+                encoding="utf-8",
+            )
+            out_rgba = root / "out_rgba"
+            convert_bms(
+                src_rgba / "c.bms",
+                ConversionOptions(output_dir=out_rgba, render_bgm=False, pad_square_preimage=True),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            with Image.open(out_rgba / "alpha_rgba_square.png") as p_rgba:
+                self.assertEqual((p_rgba.size, p_rgba.mode), ((80, 80), "RGB"))
+                # Transparent white background pixels must become pure black (0, 0, 0), never white!
+                self.assertEqual(p_rgba.getpixel((10, 25)), (0, 0, 0))
+                # Semi-transparent pixel at (0, 20) blended against black (~(128, 50, 25))
+                semi = p_rgba.getpixel((0, 20))
+                self.assertTrue(120 <= semi[0] <= 135 and 45 <= semi[1] <= 55 and 20 <= semi[2] <= 30, semi)
+                self.assertEqual(p_rgba.getpixel((40, 40)), (20, 200, 90))
+
+            # 4b) LA (80x40)
+            src_la = root / "src_la"
+            src_la.mkdir()
+            _write_sine_wav(src_la / "bd.wav", 100.0, 0.05)
+            with Image.new("LA", (80, 40), (255, 0)) as img:
+                img.putpixel((10, 10), (210, 255))
+                img.save(src_la / "alpha_la.png", format="PNG")
+            (src_la / "c.bms").write_text(
+                "#TITLE LaAlpha\n#BPM 120\n#STAGEFILE alpha_la.png\n#WAV01 bd.wav\n#00101:01\n",
+                encoding="utf-8",
+            )
+            out_la = root / "out_la"
+            convert_bms(
+                src_la / "c.bms",
+                ConversionOptions(output_dir=out_la, render_bgm=False, pad_square_preimage=True),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            with Image.open(out_la / "alpha_la_square.png") as p_la:
+                self.assertEqual((p_la.size, p_la.mode), ((80, 80), "RGB"))
+                self.assertEqual(p_la.getpixel((0, 20)), (0, 0, 0))
+                self.assertEqual(p_la.getpixel((10, 30)), (210, 210, 210))
+
+            # 4c) Palette 'P' with transparency index (80x40)
+            src_p = root / "src_p"
+            src_p.mkdir()
+            _write_sine_wav(src_p / "bd.wav", 100.0, 0.05)
+            with Image.new("P", (80, 40), 0) as img:
+                img.putpalette([255, 255, 255, 30, 180, 240] + [0] * (254 * 3))
+                img.putpixel((15, 12), 1)
+                img.save(src_p / "alpha_p.png", format="PNG", transparency=0)
+            (src_p / "c.bms").write_text(
+                "#TITLE PAlpha\n#BPM 120\n#STAGEFILE alpha_p.png\n#WAV01 bd.wav\n#00101:01\n",
+                encoding="utf-8",
+            )
+            out_p = root / "out_p"
+            convert_bms(
+                src_p / "c.bms",
+                ConversionOptions(output_dir=out_p, render_bgm=False, pad_square_preimage=True),
+                mapping=MappingConfig(tab_wavs={TabId.BD: ["01"]}),
+            )
+            with Image.open(out_p / "alpha_p_square.png") as p_p:
+                self.assertEqual((p_p.size, p_p.mode), ((80, 80), "RGB"))
+                self.assertEqual(p_p.getpixel((0, 20)), (0, 0, 0))
+                self.assertEqual(p_p.getpixel((15, 32)), (30, 180, 240))
+
 
 if __name__ == "__main__":
     unittest.main()

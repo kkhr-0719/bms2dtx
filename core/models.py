@@ -204,7 +204,10 @@ class ConversionOptions:
     swap_lr: bool = False
     wav_labels: Optional[Dict[str, str]] = None
     image_mode: str = "keep"  # "keep" | "resize" | "none"
+    pad_square_preimage: bool = False
     export_bga: bool = False
+    export_drums_ogg: bool = False
+    export_four_diffs: bool = False
 
 
 @dataclass
@@ -319,3 +322,7 @@ class ConversionResult:
     hihat_conflict_removals: List[HiHatConflictRemoval] = field(default_factory=list)
     tom_overflow_records: List[TomOverflowRecord] = field(default_factory=list)
     merged_slices: List[MergedSliceSpec] = field(default_factory=list)
+    drums_path: Optional[Path] = None
+    drums_mix_stats: Optional[MixStats] = None
+    dtx_paths: List[Path] = field(default_factory=list)
+    set_def_path: Optional[Path] = None
