@@ -204,6 +204,7 @@ class ConversionOptions:
     swap_lr: bool = False
     wav_labels: Optional[Dict[str, str]] = None
     image_mode: str = "keep"  # "keep" | "resize" | "none"
+    pad_square_preimage: bool = False
     export_bga: bool = False
     export_drums_ogg: bool = False
     export_four_diffs: bool = False

@@ -1993,6 +1993,51 @@ class AppIntegrationTests(ChartCase):
             AUTO_LP_CHIP_AUTO,
         )
 
+    def test_v060_pad_square_preimage_setting_ui_i18n_and_compat(self) -> None:
+        import json as _json
+        from core.constants import IMAGE_MODE_KEEP, IMAGE_MODE_NONE
+        from gui.i18n import TRANSLATIONS, load_app_settings
+
+        app = self.app
+        # 1) Default is True in settings and GUI
+        cfg_new = self.tmp / "sq_new.json"
+        self.assertTrue(load_app_settings(cfg_new)["pad_square_preimage"])
+        self.assertTrue(app.pad_square_preimage_var.get())
+
+        # 2) Backward-compatible with legacy settings JSON missing pad_square_preimage
+        cfg_old = self.tmp / "sq_old.json"
+        cfg_old.write_text(_json.dumps({"language": "en", "export_drums_ogg": False}), encoding="utf-8")
+        loaded_old = load_app_settings(cfg_old)
+        self.assertTrue(loaded_old["pad_square_preimage"])
+        self.assertFalse(loaded_old["export_drums_ogg"])
+
+        # 3) Toggling persists cleanly
+        app.config_path = cfg_old
+        app._persist_settings = True
+        app.pad_square_preimage_var.set(False)
+        app._on_pad_square_preimage_toggled()
+        self.assertFalse(load_app_settings(cfg_old)["pad_square_preimage"])
+
+        # 4) Checkbox enables in IMAGE_MODE_KEEP and disables in IMAGE_MODE_NONE
+        app.image_mode_combo.current(2)  # IMAGE_MODE_NONE
+        app._on_image_mode_selected()
+        self.assertEqual(app.selected_image_mode(), IMAGE_MODE_NONE)
+        self.assertTrue(app.pad_square_preimage_chk.instate(["disabled"]))
+        app.image_mode_combo.current(0)  # IMAGE_MODE_KEEP
+        app._on_image_mode_selected()
+        self.assertEqual(app.selected_image_mode(), IMAGE_MODE_KEEP)
+        self.assertTrue(app.pad_square_preimage_chk.instate(["!disabled"]))
+
+        # 5) Trilingual i18n keys present & refresh dynamically
+        for lang_code in ("zh_CN", "en", "ja"):
+            self.assertIn("pad_square_preimage_chk", TRANSLATIONS[lang_code])
+            self.assertIn("pad_square_preimage_tooltip", TRANSLATIONS[lang_code])
+        app.change_language("en")
+        self.assertEqual(
+            str(app.pad_square_preimage_chk.cget("text")),
+            TRANSLATIONS["en"]["pad_square_preimage_chk"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

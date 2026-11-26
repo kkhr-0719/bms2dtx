@@ -19,7 +19,7 @@
 - **离线混音、`drums.ogg` 干声与四难度导出**：
   - 未映射音符自动混音生成 `bgm.ogg`；默认开启 **`drums.ogg`** 鼓组+`Other` 干声导出（从最早有效鼓/`Other` 音符精确零点混缩，以音量 `10` 在 `SE8 (68)` 触发）。
   - 默认勾选**四难度底谱批量生成**：导出相同内容的 `__bsc.dtx` / `__adv.dtx` / `__extr.dtx` / `__mstr.dtx` 与保持 DTXMania 原生配色的 `set.def`（取消勾选则维持单 `.dtx`）。
-  - 支持 `#PREVIEW` 两级自动发现、图片三档处理、实验性 BGA 透传及 `#WAVxx` 行尾 `;LABEL` 自定义；每次导出生成置顶映射存档 **`__bms2dtx.json`** 与 UTF-8 转换日志 **`__bms2dtx_log.txt`**（对外发布曲包时可按需删去，加载旧版 JSON 历史字段静默兼容）。
+  - 支持 `#PREVIEW` 两级自动发现、图片三档处理、**非正方形封面自动补黑边 (1:1)**（内置 Pillow，正方形原样直拷不重编码，非正方形按原分辨率居中生成纯黑 1:1 `*_square.png` 并合成透明通道至 `#PREIMAGE`）、实验性 BGA 透传及 `#WAVxx` 行尾 `;LABEL` 自定义；每次导出生成置顶映射存档 **`__bms2dtx.json`** 与 UTF-8 转换日志 **`__bms2dtx_log.txt`**（对外发布曲包时可按需删去，加载旧版 JSON 历史字段静默兼容）。
 - **多语言与日志**：支持 **简体中文 / English / 日本語** 实时切换（保存于 `%APPDATA%\bms2dtx\settings.json`），崩溃日志记录于 `%APPDATA%\bms2dtx\crash.log`（可在设置中一键打开）。
 
 ---

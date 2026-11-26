@@ -44,6 +44,11 @@ try:
 except ImportError:  # pragma: no cover
     soxr = None  # type: ignore
 
+try:
+    from PIL import Image as _PilImage  # type: ignore
+except ImportError:  # pragma: no cover
+    _PilImage = None  # type: ignore
+
 AudioData = Union["np.ndarray", array.array]
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -1109,12 +1114,69 @@ def _resize_image_ffmpeg(
     return None
 
 
+def _pad_image_to_square_png(src: Path, dst: Path) -> Tuple[bool, Optional[str]]:
+    """Composite non-square image centered at native resolution on pure black 1:1 RGB PNG.
+
+    Returns ``(created_square, error_message)``. If the source is already square
+    (``w == h``), returns ``(False, None)`` without re-encoding.
+    """
+    if _PilImage is None:
+        return False, "Pillow (PIL) is not installed"
+    try:
+        with _PilImage.open(src) as img:
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                return False, f"invalid dimensions {w}x{h}"
+            if w == h:
+                return False, None
+
+            side = max(w, h)
+            offset = ((side - w) // 2, (side - h) // 2)
+            has_alpha = (
+                img.mode in ("RGBA", "LA", "PA", "RGBa", "La")
+                or bool(getattr(img, "has_transparency_data", False))
+                or ("transparency" in img.info)
+            )
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if has_alpha:
+                rgba = img.convert("RGBA")
+                canvas = _PilImage.new("RGBA", (side, side), (0, 0, 0, 255))
+                out_rgb = None
+                try:
+                    canvas.alpha_composite(rgba, dest=offset)
+                    out_rgb = canvas.convert("RGB")
+                    out_rgb.save(str(dst), format="PNG")
+                finally:
+                    rgba.close()
+                    canvas.close()
+                    if out_rgb is not None:
+                        out_rgb.close()
+            else:
+                rgb = img if img.mode == "RGB" else img.convert("RGB")
+                out_rgb = _PilImage.new("RGB", (side, side), (0, 0, 0))
+                try:
+                    out_rgb.paste(rgb, offset)
+                    out_rgb.save(str(dst), format="PNG")
+                finally:
+                    if rgb is not img:
+                        rgb.close()
+                    out_rgb.close()
+            return True, None
+    except Exception as exc:  # noqa: BLE001
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False, str(exc)
+
+
 def materialize_images(
     chart: BmsChart,
     output_dir: Path,
     claimed_rel_names: Sequence[str],
     *,
     image_mode: str = IMAGE_MODE_KEEP,
+    pad_square_preimage: bool = False,
     copy_files: bool = True,
     reserve_bgm_ogg: bool = True,
     reserve_drums_ogg: bool = False,
@@ -1194,6 +1256,67 @@ def materialize_images(
         if stage_rel is not None:
             pre_rel = stage_rel
             pre_dst = stage_dst
+            if (
+                pad_square_preimage
+                and chart.stagefile is not None
+                and chart.stagefile.exists
+                and chart.stagefile.resolved_path is not None
+            ):
+                src_stage = chart.stagefile.resolved_path.resolve()
+                if _PilImage is None:
+                    warnings.append(
+                        ConversionWarning(
+                            code="PREIMAGE_SQUARE_PAD_FAILED",
+                            message="Pillow (PIL) is not installed; reused original #STAGEFILE for #PREIMAGE.",
+                        )
+                    )
+                else:
+                    is_non_square = False
+                    inspect_err: Optional[str] = None
+                    try:
+                        with _PilImage.open(src_stage) as probe_img:
+                            pw, ph = probe_img.size
+                            is_non_square = pw != ph and pw > 0 and ph > 0
+                    except Exception as exc:  # noqa: BLE001
+                        inspect_err = str(exc)
+
+                    if inspect_err is not None:
+                        warnings.append(
+                            ConversionWarning(
+                                code="PREIMAGE_SQUARE_PAD_FAILED",
+                                message=(
+                                    f"Failed to inspect {src_stage.name} dimensions; "
+                                    f"reused original for #PREIMAGE ({inspect_err})."
+                                ),
+                            )
+                        )
+                    elif is_non_square:
+                        base_rel = _sanitize_rel_candidate(chart.stagefile.resolved_name, src_stage)
+                        sq_cand = base_rel.with_name(f"{base_rel.stem}_square.png")
+                        sq_cand = _disambiguate_rel(
+                            sq_cand, None, claimed_lower, allow_reuse_same_src=False
+                        )
+                        sq_rel_str = sq_cand.as_posix()
+                        claimed_lower[sq_rel_str.lower()] = None
+                        if copy_files:
+                            sq_dst = _safe_output_dst(output_dir, sq_cand, src_stage)
+                            created, pad_err = _pad_image_to_square_png(src_stage, sq_dst)
+                            if pad_err is not None:
+                                warnings.append(
+                                    ConversionWarning(
+                                        code="PREIMAGE_SQUARE_PAD_FAILED",
+                                        message=(
+                                            f"Failed to pad {src_stage.name} to 1:1 square PNG; "
+                                            f"reused original ({pad_err})."
+                                        ),
+                                    )
+                                )
+                            elif created:
+                                pre_rel = sq_rel_str.replace("/", "\\")
+                                pre_dst = sq_dst
+                        else:
+                            pre_rel = sq_rel_str.replace("/", "\\")
+                            pre_dst = None
         bg_rel, bg_dst = _copy_raw_image(chart.backbmp, "MISSING_BACKBMP", "#BACKBMP")
         return stage_rel, pre_rel, bg_rel, stage_dst, pre_dst, bg_dst, warnings
 

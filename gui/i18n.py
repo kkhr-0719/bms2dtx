@@ -128,6 +128,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image_mode_keep": "保持原图直接搬运",
         "image_mode_resize": "适配老版 DTX 尺寸（等比缩放 + 补黑边）",
         "image_mode_none": "不搬运图片",
+        "pad_square_preimage_chk": "非正方形封面自动补黑边 (1:1)",
+        "pad_square_preimage_tooltip": "将非 1:1 的 #STAGEFILE 封面按原分辨率居中补纯黑边生成 1:1 #PREIMAGE（已是正方形则原样复制不重编码）",
         "export_bga_chk": "实验性 BGA 透传",
         "settings_title": "設定 / Settings",
         "settings_general_section": "界面语言",
@@ -375,6 +377,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image_mode_keep": "Keep original images",
         "image_mode_resize": "Resize for legacy DTX (pad to 204×269 / 640×480)",
         "image_mode_none": "Do not copy images",
+        "pad_square_preimage_chk": "Auto-pad non-square cover to 1:1",
+        "pad_square_preimage_tooltip": "Pad non-square #STAGEFILE covers with pure black borders at native resolution for 1:1 #PREIMAGE (copies already-square covers verbatim)",
         "export_bga_chk": "Experimental BGA passthrough",
         "settings_title": "Settings / 設定",
         "settings_general_section": "Language",
@@ -623,6 +627,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image_mode_keep": "元画像をそのままコピー",
         "image_mode_resize": "旧DTXサイズ変換（比率維持＋黒帯）",
         "image_mode_none": "画像をコピーしない",
+        "pad_square_preimage_chk": "非正方形ジャケットに自動黒帯追加 (1:1)",
+        "pad_square_preimage_tooltip": "非正方形の #STAGEFILE を元解像度のまま中央配置＋純黒余白で 1:1 の #PREIMAGE PNG に出力（正方形は再エンコードせずコピー）",
         "export_bga_chk": "実験的 BGA パススルー",
         "settings_title": "設定 / Settings",
         "settings_general_section": "表示言語",
@@ -812,6 +818,7 @@ def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any
         "allow_left_remove": False,
         "export_drums_ogg": True,
         "export_four_diffs": True,
+        "pad_square_preimage": True,
         "wav_labels": dict(DEFAULT_WAV_LABELS),
     }
     target = Path(config_path) if config_path is not None else get_default_config_path()
@@ -834,6 +841,8 @@ def load_app_settings(config_path: Optional[Path | str] = None) -> Dict[str, Any
                     settings["export_drums_ogg"] = bool(data["export_drums_ogg"])
                 if "export_four_diffs" in data:
                     settings["export_four_diffs"] = bool(data["export_four_diffs"])
+                if "pad_square_preimage" in data:
+                    settings["pad_square_preimage"] = bool(data["pad_square_preimage"])
                 raw_labels = data.get("wav_labels")
                 if isinstance(raw_labels, dict):
                     merged = dict(DEFAULT_WAV_LABELS)
@@ -881,6 +890,8 @@ def save_app_settings(
                 existing["export_drums_ogg"] = bool(v)
             elif k == "export_four_diffs":
                 existing["export_four_diffs"] = bool(v)
+            elif k == "pad_square_preimage":
+                existing["pad_square_preimage"] = bool(v)
             elif k == "swap_lr":
                 continue
             else:

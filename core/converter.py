@@ -146,6 +146,7 @@ def build_conversion_log_text(
     drums_mix_stats: Optional[MixStats] = None,
     drums_trigger_note: Optional[PlacedDtxNote] = None,
     set_def_written: bool = False,
+    square_preimage_rel: Optional[str] = None,
     import_warnings: Sequence[ConversionWarning],
     export_warnings: Sequence[ConversionWarning],
     effective_toggle_on: bool,
@@ -183,6 +184,8 @@ def build_conversion_log_text(
             f"duration={drums_mix_stats.duration_sec:.2f}s, peak={drums_mix_stats.peak_after_norm:.4f}, "
             f"gain={drums_mix_stats.gain_applied:.4f}"
         )
+    if square_preimage_rel:
+        lines.append(f"Preimage 1:1 : {square_preimage_rel}")
     lines.extend(
         [
             f"Hi-Hat HH Open Conflict Removals : {len(plan.hihat_conflict_removals)}",
@@ -494,6 +497,7 @@ def convert_bms(
         output_dir,
         claimed_names,
         image_mode=options.image_mode,
+        pad_square_preimage=options.pad_square_preimage,
         copy_files=options.copy_retained_audio,
         reserve_bgm_ogg=not effective_toggle_on,
         reserve_drums_ogg=reserve_drums_ogg,
@@ -737,6 +741,11 @@ def convert_bms(
             drums_mix_stats=drums_mix_stats,
             drums_trigger_note=drums_trigger_note,
             set_def_written=set_def_path is not None,
+            square_preimage_rel=(
+                preimage_rel
+                if (options.pad_square_preimage and preimage_rel and preimage_rel != stagefile_rel)
+                else None
+            ),
             import_warnings=import_warnings,
             export_warnings=export_warnings,
             effective_toggle_on=effective_toggle_on,

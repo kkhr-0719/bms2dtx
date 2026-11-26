@@ -46,6 +46,12 @@ def smoke_test(outfile: Optional[str] = None) -> int:
         import soxr
 
         lines.append(f"soxr {soxr.__version__}")
+        import PIL
+        from PIL import Image as _PilImage
+
+        _probe_img = _PilImage.new("RGB", (4, 4), (0, 0, 0))
+        _probe_img.close()
+        lines.append(f"Pillow {PIL.__version__}")
         import tkinter
 
         import _tkinter  # noqa: F401

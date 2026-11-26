@@ -825,6 +825,7 @@ class App:
             "allow_left_remove": False,
             "export_drums_ogg": True,
             "export_four_diffs": True,
+            "pad_square_preimage": True,
             "wav_labels": dict(DEFAULT_WAV_LABELS),
         }
         if self._persist_settings:
@@ -836,6 +837,7 @@ class App:
         self.allow_left_remove: bool = bool(loaded_cfg.get("allow_left_remove", False))
         self.export_drums_ogg: bool = bool(loaded_cfg.get("export_drums_ogg", True))
         self.export_four_diffs_default: bool = bool(loaded_cfg.get("export_four_diffs", True))
+        self.pad_square_preimage_default: bool = bool(loaded_cfg.get("pad_square_preimage", True))
         self.ffmpeg_explicit: Optional[str] = loaded_cfg.get("ffmpeg_path")
         self.ffmpeg_path: Optional[str] = None
         self.last_output_dir: Optional[Path] = None
@@ -1401,9 +1403,22 @@ class App:
             state="readonly",
             width=36,
         )
-        self.image_mode_combo.pack(side="left", padx=(4, 14))
+        self.image_mode_combo.pack(side="left", padx=(4, 12))
         self.image_mode_combo.bind("<<ComboboxSelected>>", self._on_image_mode_selected)
         self._refresh_image_mode_combo()
+
+        self.pad_square_preimage_var = tk.BooleanVar(value=self.pad_square_preimage_default)
+        self.pad_square_preimage_chk = ttk.Checkbutton(
+            opts2,
+            text=tr("pad_square_preimage_chk"),
+            variable=self.pad_square_preimage_var,
+            command=self._on_pad_square_preimage_toggled,
+        )
+        self.pad_square_preimage_chk.pack(side="left", padx=(0, 12))
+        self._pad_square_tip = _Tooltip(
+            self.pad_square_preimage_chk, lambda: tr("pad_square_preimage_tooltip")
+        )
+        self._sync_pad_square_chk_state()
 
         self.export_bga_var = tk.BooleanVar(value=False)
         self.export_bga_chk = ttk.Checkbutton(
@@ -1443,6 +1458,12 @@ class App:
         idx = self.image_mode_combo.current()
         if 0 <= idx < len(_IMAGE_MODES_ORDER):
             self._image_mode_key = _IMAGE_MODES_ORDER[idx]
+        self._sync_pad_square_chk_state()
+
+    def _sync_pad_square_chk_state(self) -> None:
+        if hasattr(self, "pad_square_preimage_chk"):
+            state = "normal" if self._image_mode_key == IMAGE_MODE_KEEP else "disabled"
+            self.pad_square_preimage_chk.configure(state=state)
 
     def selected_image_mode(self) -> str:
         return self._image_mode_key
@@ -1456,6 +1477,13 @@ class App:
         if self._persist_settings:
             save_app_settings(
                 {"export_four_diffs": bool(self.four_diffs_var.get())},
+                self.config_path,
+            )
+
+    def _on_pad_square_preimage_toggled(self) -> None:
+        if self._persist_settings:
+            save_app_settings(
+                {"pad_square_preimage": bool(self.pad_square_preimage_var.get())},
                 self.config_path,
             )
 
@@ -1511,6 +1539,8 @@ class App:
         self.four_diffs_chk.configure(text=tr("four_diffs_chk"))
         self.image_mode_label.configure(text=tr("image_mode_label"))
         self._refresh_image_mode_combo()
+        self.pad_square_preimage_chk.configure(text=tr("pad_square_preimage_chk"))
+        self._sync_pad_square_chk_state()
         self.export_bga_chk.configure(text=tr("export_bga_chk"))
 
         self.refresh_all()
@@ -1733,6 +1763,7 @@ class App:
                         "allow_left_remove": self.allow_left_remove,
                         "export_drums_ogg": self.export_drums_ogg,
                         "export_four_diffs": bool(self.four_diffs_var.get()),
+                        "pad_square_preimage": bool(self.pad_square_preimage_var.get()),
                         "wav_labels": new_labels,
                     },
                     self.config_path,
@@ -2754,6 +2785,7 @@ class App:
             swap_lr=bool(self.swap_lr_var.get()),
             wav_labels=dict(self.wav_labels),
             image_mode=self.selected_image_mode(),
+            pad_square_preimage=bool(self.pad_square_preimage_var.get()),
             export_bga=bool(self.export_bga_var.get()),
             export_drums_ogg=bool(self.export_drums_ogg),
             export_four_diffs=bool(self.four_diffs_var.get()),

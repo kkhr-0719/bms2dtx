@@ -89,6 +89,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--ffmpeg", type=str, default=None, help="Explicit path to ffmpeg executable")
     parser.add_argument("--drums-ogg", action="store_true", help="Export drums.ogg stem on SE8 (68) at volume 10")
     parser.add_argument("--four-diffs", action="store_true", help="Export 4-difficulty chart files and set.def")
+    parser.add_argument("--square-cover", action="store_true", help="Auto-pad non-square #STAGEFILE cover to 1:1 PNG for #PREIMAGE")
     parser.add_argument("--batch", action="store_true", help="Convert all .bms/.bme files in input directory")
     args = parser.parse_args(argv)
 
@@ -164,6 +165,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         dlevel=args.dlevel,
         ffmpeg_path=args.ffmpeg,
         render_bgm=not args.no_bgm,
+        pad_square_preimage=bool(args.square_cover),
         export_drums_ogg=bool(args.drums_ogg),
         export_four_diffs=bool(args.four_diffs),
     )

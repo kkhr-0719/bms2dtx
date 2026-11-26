@@ -73,7 +73,7 @@
   - 原生 `#GENRE:`（`;` 转全角 `；`）、固定 `#COMMENT: via bms2dtx`、`#WAVxx` 行尾 `\t;<LABEL>` 注释（支持自定义与清洗）；
   - 2 级 `#PREVIEW`（先头部显式定义，未定义则扫描母目录未入谱 `preview*` 音频）；
   - 全局 `Swap L/R` 与单切片 `⇄ L/R` 异或（`effective_swap = bool(global_swap_lr) ^ bool(item_override)`）左右声道互换（试听、`bgm.ogg` 单切片解码阶段翻转、`#PREVIEW` 及保留切片；单声道切片原样复制）；
-  - `#STAGEFILE` / `#PREIMAGE` / `#BACKGROUND` 三档图片处理（原图直拷 / `204x269`+`640x480` 等比缩放补黑边 / 不搬运）与实验性 BGA 透传（视频转 `#AVIxx` + `54` 轨，图片保持 `#BMPxx` + `04`/`07` 轨）；
+  - `#STAGEFILE` / `#PREIMAGE` / `#BACKGROUND` 三档图片处理（原图直拷 / `204x269`+`640x480` 等比缩放补黑边 / 不搬运）与实验性 BGA 透传（视频转 `#AVIxx` + `54` 轨，图片保持 `#BMPxx` + `04`/`07` 轨）；并在 `keep` 模式下通过内置 Pillow 无外置依赖支持「非正方形封面自动补黑边 (1:1)」生成纯黑 1:1 `#PREIMAGE`（正方形原样直拷不重编码，含透明通道自动贴纯黑底防白边，四难度 `.dtx` 同步指向正方形封面）。
   - 设置弹窗语言标签固定为跨语言 **`🌐 Language:`**，含「允许左侧移除分配」勾选框与底部「打开日志目录」按钮，支持三语（`zh_CN` / `en` / `ja`）热切换与 `%APPDATA%\bms2dtx\settings.json` 持久化。
 - **导出自动存档**：每次成功导出自动在输出目录根目录写入完整工程映射 **`__bms2dtx.json`**；界面按钮「另存为 JSON...」保留手动另存，「载入映射 JSON...」默认定位至输出目录。
 
